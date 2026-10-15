@@ -1,7 +1,5 @@
 # ansible-role-elastic-tls
 
-[![CI](https://github.com/jmaughmer/ansible-role-elastic-tls/actions/workflows/ci.yml/badge.svg)](https://github.com/jmaughmer/ansible-role-elastic-tls/actions/workflows/ci.yml)
-
 This Ansible role issues TLS certificates for Elastic Stack hosts, from a private CA it creates and keeps or from Let's Encrypt, and publishes them as the host fact `elastic_tls_ssl_certificates`. The [elasticsearch](https://github.com/jmaughmer/ansible-role-elasticsearch), [kibana](https://github.com/jmaughmer/ansible-role-kibana), [logstash](https://github.com/jmaughmer/ansible-role-logstash) and [elastic_fleet](https://github.com/jmaughmer/ansible-role-elastic-fleet) roles read that fact, install the files and configure TLS.
 
 The role only writes certificates and keys below `elastic_tls_dir` (`/etc/pki/elastic-tls`), plus the CA on the CA host. It never edits `elasticsearch.yml`, `kibana.yml` or any other Elastic configuration, and never restarts a service: the consumer roles do that, in health-checked batches.
