@@ -1,0 +1,84 @@
+---
+# Issues one certificate (elastic_tls_cert) for this host from the private CA.
+# The certificate is reissued when its names or usages change, when it was not
+# signed by the current CA, or when it expires within elastic_tls_renew_before_days.
+
+- name: Generate the private key for {{ elastic_tls_cert.name }}
+  community.crypto.openssl_privatekey:
+    path: "{{ elastic_tls_cert.key_path }}"
+    type: "{{ elastic_tls_key_type }}"
+    size: "{{ elastic_tls_key_size if elastic_tls_key_type == 'RSA' else omit }}"
+    curve: "{{ elastic_tls_key_curve if elastic_tls_key_type == 'ECC' else omit }}"
+    # PKCS#8, which every Elastic component reads, also in FIPS mode.
+    format: pkcs8
+    format_mismatch: convert
+    owner: root
+    group: root
+    mode: "0600"
+  register: _elastic_tls_key
+  no_log: true
+
+- name: Create the certificate request for {{ elastic_tls_cert.name }}
+  community.crypto.openssl_csr_pipe:
+    privatekey_path: "{{ elastic_tls_cert.key_path }}"
+    common_name: "{{ _cn if _cn | length <= 64 else omit }}"
+    use_common_name_for_san: false
+    subject_alt_name: >-
+      {{ (elastic_tls_cert.dns | map('regex_replace', '^', 'DNS:') | list)
+         + (elastic_tls_cert.ip | map('regex_replace', '^', 'IP:') | list) }}
+    basic_constraints:
+      - CA:FALSE
+    key_usage: "{{ ['digitalSignature', 'keyEncipherment'] if elastic_tls_key_type == 'RSA' else ['digitalSignature'] }}"
+    key_usage_critical: true
+    extended_key_usage: "{{ elastic_tls_cert.usage | map('extract', _elastic_tls_usage_eku) | list }}"
+  vars:
+    _cn: "{{ (elastic_tls_cert.dns + elastic_tls_cert.ip) | first }}"
+  register: _elastic_tls_csr
+  check_mode: false
+  # A request built in memory; nothing on the host changes.
+  changed_when: false
+  when: not (ansible_check_mode and _elastic_tls_key is changed)
+
+- name: Read the current certificate for {{ elastic_tls_cert.name }}
+  ansible.builtin.slurp:
+    src: "{{ elastic_tls_cert.certificate_path }}"
+  register: _elastic_tls_current
+  failed_when: false
+
+- name: Check the current certificate's expiry for {{ elastic_tls_cert.name }}
+  community.crypto.x509_certificate_info:
+    content: "{{ _elastic_tls_current.content | b64decode }}"
+    valid_at:
+      renew: "+{{ elastic_tls_renew_before_days }}d"
+  register: _elastic_tls_current_info
+  when: _elastic_tls_current.content is defined
+
+# Runs on the CA host, which only sees the CSR. The module compares the current
+# certificate with the CSR and the CA and signs a new one only when needed.
+- name: Sign the certificate for {{ elastic_tls_cert.name }}
+  community.crypto.x509_certificate_pipe:
+    provider: ownca
+    csr_content: "{{ _elastic_tls_csr.csr }}"
+    content: "{{ (_elastic_tls_current.content | b64decode) if _elastic_tls_current.content is defined else omit }}"
+    ownca_path: "{{ elastic_tls_ca_certificate_path }}"
+    ownca_privatekey_path: "{{ elastic_tls_ca_privatekey_path }}"
+    ownca_privatekey_passphrase: "{{ elastic_tls_ca_passphrase if elastic_tls_ca_passphrase | length > 0 else omit }}"
+    ownca_not_before: "-1d"
+    ownca_not_after: "+{{ elastic_tls_cert.days }}d"
+    force: "{{ not (_elastic_tls_current_info.valid_at.renew | default(true)) }}"
+  register: _elastic_tls_signed
+  delegate_to: "{{ elastic_tls_ca_host }}"
+  check_mode: false
+  when:
+    - _elastic_tls_ca_ready | bool
+    - _elastic_tls_csr is not skipped
+  no_log: "{{ elastic_tls_ca_passphrase | length > 0 }}"
+
+- name: Install the certificate for {{ elastic_tls_cert.name }}
+  ansible.builtin.copy:
+    content: "{{ _elastic_tls_signed.certificate }}"
+    dest: "{{ elastic_tls_cert.certificate_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: _elastic_tls_signed is not skipped

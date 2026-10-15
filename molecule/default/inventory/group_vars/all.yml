@@ -1,0 +1,4 @@
+---
+elastic_tls_provider: ca
+elastic_tls_ca_common_name: Molecule Test CA
+elastic_tls_ca_passphrase: molecule-test-passphrase

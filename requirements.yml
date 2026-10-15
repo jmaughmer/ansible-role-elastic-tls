@@ -1,0 +1,6 @@
+---
+# Collections this role needs:
+#   ansible-galaxy collection install -r requirements.yml
+collections:
+  - name: community.crypto
+    version: ">=2.10.0"

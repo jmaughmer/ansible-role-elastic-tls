@@ -1,0 +1,41 @@
+---
+# elastic_tls_certificates with defaults filled in and file paths added.
+_elastic_tls_certificates: >-
+  {%- set ns = namespace(out=[]) -%}
+  {%- for c in elastic_tls_certificates -%}
+  {%-   set name = c.name | default(inventory_hostname, true) -%}
+  {%-   set ns.out = ns.out + [{
+          'name': name,
+          'dns': c.dns | default(elastic_tls_default_dns),
+          'ip': c.ip | default(elastic_tls_default_ip if elastic_tls_provider == 'ca' else []),
+          'usage': c.usage | default(['server', 'client'] if elastic_tls_provider == 'ca' else ['server']),
+          'days': c.days | default(elastic_tls_cert_days) | int,
+          'certificate_path': elastic_tls_dir ~ '/certs/' ~ name ~ '.crt',
+          'key_path': elastic_tls_dir ~ '/private/' ~ name ~ '.key'}] -%}
+  {%- endfor -%}
+  {{ ns.out }}
+
+# CA file published with every entry.
+_elastic_tls_ca_path: >-
+  {{ elastic_tls_dir ~ '/certs/ca.crt' if elastic_tls_provider == 'ca' else elastic_tls_acme_ca_path }}
+
+# The fact consumer roles read.
+_elastic_tls_published: >-
+  {%- set ns = namespace(out=[]) -%}
+  {%- for c in _elastic_tls_certificates -%}
+  {%-   set ns.out = ns.out + [{
+          'name': c.name,
+          'certificate': {'path': c.certificate_path},
+          'key': {'path': c.key_path},
+          'ca': {'path': _elastic_tls_ca_path}}] -%}
+  {%- endfor -%}
+  {{ ns.out }}
+
+_elastic_tls_usage_eku:
+  server: serverAuth
+  client: clientAuth
+
+# Variables of the certutil-based version of this role. Any of them being set
+# means an inventory that has not been migrated yet.
+_elastic_tls_legacy_vars_regex: >-
+  ^elastic_tls_(components|component_settings|certutil|ca_key_password|cert_name|cert_extra_dns|cert_extra_ip|cert_dns|cert_ip|cert_regenerate|ca_cert_filename|cert_filename|key_filename|restart_services|elasticsearch_.*|kibana_.*)$

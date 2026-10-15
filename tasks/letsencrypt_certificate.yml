@@ -1,0 +1,99 @@
+---
+# Issues one certificate (elastic_tls_cert) for this host from the ACME CA. The
+# certificate file holds the full chain. It is renewed when it expires within
+# elastic_tls_renew_before_days, or when the request (names, key) changes.
+
+- name: Generate the private key for {{ elastic_tls_cert.name }}
+  community.crypto.openssl_privatekey:
+    path: "{{ elastic_tls_cert.key_path }}"
+    type: "{{ elastic_tls_key_type }}"
+    size: "{{ elastic_tls_key_size if elastic_tls_key_type == 'RSA' else omit }}"
+    curve: "{{ elastic_tls_key_curve if elastic_tls_key_type == 'ECC' else omit }}"
+    format: pkcs8
+    format_mismatch: convert
+    owner: root
+    group: root
+    mode: "0600"
+  register: _elastic_tls_key
+  no_log: true
+
+- name: Create the certificate request for {{ elastic_tls_cert.name }}
+  community.crypto.openssl_csr:
+    path: "{{ elastic_tls_dir }}/csr/{{ elastic_tls_cert.name }}.csr"
+    privatekey_path: "{{ elastic_tls_cert.key_path }}"
+    common_name: "{{ elastic_tls_cert.dns[0] if elastic_tls_cert.dns[0] | length <= 64 else omit }}"
+    use_common_name_for_san: false
+    subject_alt_name: "{{ elastic_tls_cert.dns | map('regex_replace', '^', 'DNS:') | list }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: _elastic_tls_csr
+  when: not (ansible_check_mode and _elastic_tls_key is changed)
+
+- name: Request the challenges for {{ elastic_tls_cert.name }}
+  community.crypto.acme_certificate:
+    acme_directory: "{{ elastic_tls_acme_directory }}"
+    account_key_src: "{{ elastic_tls_dir }}/acme/account.key"
+    account_email: "{{ elastic_tls_acme_email if elastic_tls_acme_email | length > 0 else omit }}"
+    terms_agreed: "{{ elastic_tls_acme_terms_agreed | bool }}"
+    challenge: "{{ elastic_tls_acme_challenge }}"
+    csr: "{{ elastic_tls_dir }}/csr/{{ elastic_tls_cert.name }}.csr"
+    fullchain_dest: "{{ elastic_tls_cert.certificate_path }}"
+    remaining_days: "{{ elastic_tls_renew_before_days }}"
+    force: "{{ _elastic_tls_csr is changed }}"
+  register: _elastic_tls_acme
+  when: _elastic_tls_csr is not skipped
+
+- name: Answer the challenges for {{ elastic_tls_cert.name }}
+  when:
+    - _elastic_tls_acme is changed
+    - _elastic_tls_acme.challenge_data | default({}) | length > 0
+  block:
+    - name: Write the http-01 challenge files for {{ elastic_tls_cert.name }}
+      ansible.builtin.copy:
+        content: "{{ item.value['http-01'].resource_value }}"
+        dest: "{{ elastic_tls_acme_webroot }}/{{ item.value['http-01'].resource }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ _elastic_tls_acme.challenge_data | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: elastic_tls_acme_challenge == 'http-01'
+
+    - name: Create the dns-01 records for {{ elastic_tls_cert.name }}
+      ansible.builtin.include_tasks: "{{ elastic_tls_acme_dns_tasks }}"
+      vars:
+        elastic_tls_acme_dns_records: "{{ _elastic_tls_acme.challenge_data_dns }}"
+        elastic_tls_acme_dns_state: present
+      when: elastic_tls_acme_challenge == 'dns-01'
+
+    - name: Get the certificate for {{ elastic_tls_cert.name }}
+      community.crypto.acme_certificate:
+        acme_directory: "{{ elastic_tls_acme_directory }}"
+        account_key_src: "{{ elastic_tls_dir }}/acme/account.key"
+        account_email: "{{ elastic_tls_acme_email if elastic_tls_acme_email | length > 0 else omit }}"
+        terms_agreed: "{{ elastic_tls_acme_terms_agreed | bool }}"
+        challenge: "{{ elastic_tls_acme_challenge }}"
+        csr: "{{ elastic_tls_dir }}/csr/{{ elastic_tls_cert.name }}.csr"
+        fullchain_dest: "{{ elastic_tls_cert.certificate_path }}"
+        remaining_days: "{{ elastic_tls_renew_before_days }}"
+        force: "{{ _elastic_tls_csr is changed }}"
+        data: "{{ _elastic_tls_acme }}"
+
+  always:
+    - name: Remove the http-01 challenge files for {{ elastic_tls_cert.name }}
+      ansible.builtin.file:
+        path: "{{ elastic_tls_acme_webroot }}/{{ item.value['http-01'].resource }}"
+        state: absent
+      loop: "{{ _elastic_tls_acme.challenge_data | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: elastic_tls_acme_challenge == 'http-01'
+
+    - name: Remove the dns-01 records for {{ elastic_tls_cert.name }}
+      ansible.builtin.include_tasks: "{{ elastic_tls_acme_dns_tasks }}"
+      vars:
+        elastic_tls_acme_dns_records: "{{ _elastic_tls_acme.challenge_data_dns }}"
+        elastic_tls_acme_dns_state: absent
+      when: elastic_tls_acme_challenge == 'dns-01'

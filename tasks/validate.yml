@@ -1,27 +1,87 @@
 ---
-- name: Check that the CA host is in the inventory
+- name: Check for variables of the certutil-based role
   ansible.builtin.assert:
     that:
-      - elastic_tls_ca_host in hostvars
-    fail_msg: "elastic_tls_ca_host '{{ elastic_tls_ca_host }}' is not an inventory host."
-    quiet: true
-  run_once: true
-
-- name: Check that every component is known
-  ansible.builtin.assert:
-    that:
-      - elastic_tls_components | difference(elastic_tls_component_settings.keys() | list) | length == 0
+      - _elastic_tls_legacy | length == 0
     fail_msg: >-
-      Unknown component(s) {{ elastic_tls_components | difference(elastic_tls_component_settings.keys() | list) }}.
-      Valid names: {{ elastic_tls_component_settings.keys() | list }}.
+      {{ _elastic_tls_legacy | join(', ') }} belonged to the certutil-based version of this role and
+      no longer do anything. This version only issues certificates and publishes them as
+      elastic_tls_ssl_certificates; the elasticsearch, kibana, logstash and elastic_fleet roles
+      install them and configure TLS. See "Migrating from the certutil-based role" in the README.
     quiet: true
+  vars:
+    _elastic_tls_legacy: "{{ query('ansible.builtin.varnames', _elastic_tls_legacy_vars_regex) }}"
 
-- name: Check that the host certificate has at least one subjectAltName
+- name: Check the provider
   ansible.builtin.assert:
     that:
-      - (elastic_tls_cert_dns | length + elastic_tls_cert_ip | length) > 0
+      - elastic_tls_provider in ['ca', 'letsencrypt']
+      - elastic_tls_key_type in ['RSA', 'ECC']
     fail_msg: >-
-      No DNS or IP subjectAltNames found for {{ inventory_hostname }}. Gather facts
-      or set elastic_tls_cert_extra_dns / elastic_tls_cert_extra_ip.
+      elastic_tls_provider must be ca or letsencrypt (got '{{ elastic_tls_provider }}'), and
+      elastic_tls_key_type RSA or ECC (got '{{ elastic_tls_key_type }}').
     quiet: true
-  when: elastic_tls_components | length > 0
+
+- name: Check elastic_tls_certificates
+  ansible.builtin.assert:
+    that:
+      - elastic_tls_certificates is sequence
+      - elastic_tls_certificates is not string
+      - elastic_tls_certificates | reject('mapping') | list | length == 0
+      - _names | length == _names | unique | length
+      - _names | reject('match', '^[A-Za-z0-9][A-Za-z0-9._-]*$') | list | length == 0
+    fail_msg: >-
+      elastic_tls_certificates must be a list of mappings with unique names made of letters, digits,
+      dots, dashes and underscores (got names {{ _names }}).
+    quiet: true
+  vars:
+    _names: "{{ elastic_tls_certificates | map(attribute='name', default=inventory_hostname) | list }}"
+
+- name: Check each certificate request
+  ansible.builtin.assert:
+    that:
+      - item.dns is sequence and item.dns is not string
+      - item.ip is sequence and item.ip is not string
+      - item.usage is sequence and item.usage is not string
+      - item.usage | length > 0
+      - item.usage | difference(['server', 'client']) | length == 0
+      - (item.dns | length + item.ip | length) > 0
+      - item.days > 0
+    fail_msg: >-
+      Certificate '{{ item.name }}' needs at least one DNS or IP subjectAltName (gather facts, or set
+      dns / ip), a usage list made of server and client, and a positive days. Got dns {{ item.dns }},
+      ip {{ item.ip }}, usage {{ item.usage }}, days {{ item.days }}.
+    quiet: true
+  loop: "{{ _elastic_tls_certificates }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the private CA settings
+  ansible.builtin.assert:
+    that:
+      - elastic_tls_ca_host in hostvars or elastic_tls_ca_host in ['localhost', '127.0.0.1']
+      - elastic_tls_ca_common_name | length > 0
+    fail_msg: >-
+      elastic_tls_ca_host '{{ elastic_tls_ca_host }}' must be an inventory host (or localhost), and
+      elastic_tls_ca_common_name must not be empty.
+    quiet: true
+  when: elastic_tls_provider == 'ca'
+
+# Let's Encrypt stopped including clientAuth in its certificates in 2026 and
+# never issues for IP addresses in its default profile.
+- name: Check the ACME settings
+  ansible.builtin.assert:
+    that:
+      - elastic_tls_acme_terms_agreed | bool
+      - elastic_tls_acme_challenge in ['http-01', 'dns-01']
+      - elastic_tls_acme_challenge != 'dns-01' or elastic_tls_acme_dns_tasks | length > 0
+      - _elastic_tls_certificates | selectattr('usage', 'contains', 'client') | list | length == 0
+      - _elastic_tls_certificates | map(attribute='ip') | flatten | length == 0
+      - _elastic_tls_certificates | map(attribute='dns') | select('equalto', []) | list | length == 0
+    fail_msg: >-
+      With elastic_tls_provider letsencrypt: set elastic_tls_acme_terms_agreed to true;
+      elastic_tls_acme_challenge must be http-01 or dns-01 (dns-01 needs elastic_tls_acme_dns_tasks);
+      and every certificate needs DNS names, no IP addresses and usage [server] only. Client
+      certificates, including Elasticsearch node certificates, have to come from the private CA.
+    quiet: true
+  when: elastic_tls_provider == 'letsencrypt'

@@ -1,0 +1,9 @@
+---
+elastic_tls_certificates:
+  # Name, SANs and usage from the defaults.
+  - {}
+  - name: kibana-public
+    dns:
+      - kibana.example.test
+    ip: []
+    usage: [server]

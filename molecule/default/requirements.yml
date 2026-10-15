@@ -1,3 +1,4 @@
 ---
 collections:
-  - name: community.docker
+  - name: community.crypto    # the role itself
+  - name: containers.podman   # Molecule's podman driver

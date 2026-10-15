@@ -1,0 +1,28 @@
+---
+- name: Create the ACME directories
+  ansible.builtin.file:
+    path: "{{ elastic_tls_dir }}/{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - acme
+    - csr
+
+- name: Generate the ACME account key
+  community.crypto.openssl_privatekey:
+    path: "{{ elastic_tls_dir }}/acme/account.key"
+    type: ECC
+    curve: secp256r1
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Issue each certificate
+  ansible.builtin.include_tasks: letsencrypt_certificate.yml
+  loop: "{{ _elastic_tls_certificates }}"
+  loop_control:
+    loop_var: elastic_tls_cert
+    label: "{{ elastic_tls_cert.name }}"

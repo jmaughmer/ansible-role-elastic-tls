@@ -1,28 +1,40 @@
 ---
+# Issues certificates and publishes them as elastic_tls_ssl_certificates. The
+# role only writes below elastic_tls_dir (and the CA directory on the CA host):
+# it does not touch Elastic configuration files and does not restart services.
+# The consumer roles copy the files and do their own, health-checked restarts.
+
 - name: Validate settings
   ansible.builtin.import_tasks: validate.yml
 
-- name: Create the certificate authority
-  ansible.builtin.import_tasks: ca.yml
+- name: Install the cryptography library
+  ansible.builtin.package:
+    name: "{{ elastic_tls_packages }}"
+    state: present
+  when: elastic_tls_packages | length > 0
 
-- name: Issue the host certificate
-  ansible.builtin.import_tasks: certificate.yml
-  when: elastic_tls_components | length > 0
-
-- name: Deploy certificates for each component
-  ansible.builtin.include_tasks: deploy.yml
-  loop: "{{ elastic_tls_components }}"
+- name: Create the certificate directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ elastic_tls_dir }}", mode: "0755"}
+    - {path: "{{ elastic_tls_dir }}/certs", mode: "0755"}
+    - {path: "{{ elastic_tls_dir }}/private", mode: "0700"}
   loop_control:
-    loop_var: elastic_tls_component
+    label: "{{ item.path }}"
 
-- name: Configure Elasticsearch
-  ansible.builtin.include_tasks: elasticsearch.yml
-  when:
-    - "'elasticsearch' in elastic_tls_components"
-    - elastic_tls_elasticsearch_manage_config | bool
+- name: Issue certificates from the private CA
+  ansible.builtin.include_tasks: ca.yml
+  when: elastic_tls_provider == 'ca'
 
-- name: Configure Kibana
-  ansible.builtin.include_tasks: kibana.yml
-  when:
-    - "'kibana' in elastic_tls_components"
-    - elastic_tls_kibana_manage_config | bool
+- name: Issue certificates from the ACME CA
+  ansible.builtin.include_tasks: letsencrypt.yml
+  when: elastic_tls_provider == 'letsencrypt'
+
+- name: Publish the issued certificates
+  ansible.builtin.set_fact:
+    elastic_tls_ssl_certificates: "{{ _elastic_tls_published }}"
