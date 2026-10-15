@@ -1,51 +1,63 @@
 ---
+# Three containers on one network, all in the play:
+#   es01      group elasticsearch, so it is the CA host; default certificate
+#   kb01      two certificates, one of them server-only with an extra name
+#   client01  no certificates, only the CA certificate
+# MOLECULE_DISTRO picks the EL release (default rockylinux9; also rockylinux10).
+# Nothing Elastic is installed: the role must work on a bare host, before the
+# elasticsearch role has run.
+role_name_check: 1
+
 dependency:
-  name: galaxy
-  options:
-    requirements-file: molecule/default/requirements.yml
+  name: galaxy   # installs requirements.yml next to this file
 
 driver:
-  name: docker
+  name: podman
 
 platforms:
   - name: es01
-    image: "geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
     pre_build_image: true
-    command: ""
-    cgroupns_mode: host
-    privileged: true
-    volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw
-    groups:
-      - elasticsearch
+    override_command: false   # keep the image's own CMD: systemd as PID 1
+    systemd: always
+    network: elastic_tls_molecule
+    groups: [elasticsearch]
+
   - name: kb01
-    image: "geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
     pre_build_image: true
-    command: ""
-    cgroupns_mode: host
-    privileged: true
-    volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw
-    groups:
-      - kibana
+    override_command: false
+    systemd: always
+    network: elastic_tls_molecule
+    groups: [kibana]
+
+  - name: client01
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false
+    systemd: always
+    network: elastic_tls_molecule
+    groups: [clients]
 
 provisioner:
   name: ansible
   inventory:
-    group_vars:
-      all:
-        # The containers do not run the Elastic services.
-        elastic_tls_restart_services: false
-        elastic_tls_cert_extra_dns:
-          - "{{ inventory_hostname }}.example.test"
-    host_vars:
-      es01:
-        elastic_tls_components:
-          - elasticsearch
-      kb01:
-        elastic_tls_components:
-          - kibana
-          - logstash
+    links:
+      group_vars: inventory/group_vars/
+      host_vars: inventory/host_vars/
 
 verifier:
   name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - check
+    - verify
+    - destroy

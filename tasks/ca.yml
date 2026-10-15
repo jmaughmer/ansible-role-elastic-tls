@@ -1,12 +1,19 @@
 ---
-# Everything in this file runs once, on the CA host.
+# The CA is created once, on elastic_tls_ca_host. Each host then makes its own
+# key and CSR, the CA host signs the CSR, and only the certificate travels
+# back, so host keys never leave their host.
+#
+# An existing CA key or certificate is never replaced or rewritten, so a CA
+# left behind by the certutil-based version of this role (same paths) keeps
+# being used.
 
-- name: Install unzip on the CA host
+- name: Install the cryptography library on the CA host
   ansible.builtin.package:
-    name: unzip
+    name: "{{ elastic_tls_packages }}"
     state: present
   delegate_to: "{{ elastic_tls_ca_host }}"
   run_once: true
+  when: elastic_tls_packages | length > 0
 
 - name: Create the CA directories
   ansible.builtin.file:
@@ -17,47 +24,125 @@
     mode: "0700"
   loop:
     - "{{ elastic_tls_ca_dir }}"
-    - "{{ elastic_tls_ca_dir }}/specs"
-    - "{{ elastic_tls_ca_dir }}/certs"
+    - "{{ elastic_tls_ca_privatekey_path | dirname }}"
+    - "{{ elastic_tls_ca_certificate_path | dirname }}"
   delegate_to: "{{ elastic_tls_ca_host }}"
   run_once: true
 
-- name: Generate the CA
-  ansible.builtin.command:
-    argv: >-
-      {{ [elastic_tls_certutil, 'ca', '--silent', '--pem',
-          '--days', elastic_tls_ca_days | string,
-          '--out', elastic_tls_ca_dir ~ '/ca.zip']
-         + (['--pass', elastic_tls_ca_key_password] if elastic_tls_ca_key_password | length > 0 else []) }}
-    creates: "{{ elastic_tls_ca_dir }}/ca.zip"
+- name: Look for an existing CA
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    get_checksum: false
+  loop:
+    - "{{ elastic_tls_ca_privatekey_path }}"
+    - "{{ elastic_tls_ca_certificate_path }}"
+  register: _elastic_tls_ca_stat
   delegate_to: "{{ elastic_tls_ca_host }}"
   run_once: true
-  no_log: "{{ elastic_tls_ca_key_password | length > 0 }}"
 
-- name: Extract the CA
-  ansible.builtin.unarchive:
-    src: "{{ elastic_tls_ca_dir }}/ca.zip"
-    dest: "{{ elastic_tls_ca_dir }}"
-    remote_src: true
+- name: Generate the CA private key
+  community.crypto.openssl_privatekey:
+    path: "{{ elastic_tls_ca_privatekey_path }}"
+    type: RSA
+    size: "{{ elastic_tls_ca_key_size }}"
+    format: pkcs8
+    passphrase: "{{ elastic_tls_ca_passphrase if elastic_tls_ca_passphrase | length > 0 else omit }}"
+    cipher: "{{ 'auto' if elastic_tls_ca_passphrase | length > 0 else omit }}"
     owner: root
     group: root
-    mode: "u=rwX,go="
+    mode: "0600"
+  register: _elastic_tls_ca_key
   delegate_to: "{{ elastic_tls_ca_host }}"
   run_once: true
+  when: not _elastic_tls_ca_stat.results[0].stat.exists
+  no_log: true
+
+# In check mode on a new CA there is no key to sign with yet.
+- name: Note whether the CA can sign in this run
+  ansible.builtin.set_fact:
+    _elastic_tls_ca_ready: "{{ not (ansible_check_mode and _elastic_tls_ca_key is changed) }}"
+
+- name: Create the CA certificate request
+  community.crypto.openssl_csr_pipe:
+    privatekey_path: "{{ elastic_tls_ca_privatekey_path }}"
+    privatekey_passphrase: "{{ elastic_tls_ca_passphrase if elastic_tls_ca_passphrase | length > 0 else omit }}"
+    common_name: "{{ elastic_tls_ca_common_name }}"
+    use_common_name_for_san: false
+    basic_constraints:
+      - CA:TRUE
+    basic_constraints_critical: true
+    key_usage:
+      - keyCertSign
+      - cRLSign
+    key_usage_critical: true
+  register: _elastic_tls_ca_csr
+  delegate_to: "{{ elastic_tls_ca_host }}"
+  run_once: true
+  check_mode: false
+  # A request built in memory; nothing on the host changes.
+  changed_when: false
+  when:
+    - not _elastic_tls_ca_stat.results[1].stat.exists
+    - _elastic_tls_ca_ready | bool
+  no_log: "{{ elastic_tls_ca_passphrase | length > 0 }}"
+
+- name: Self-sign the CA certificate
+  community.crypto.x509_certificate:
+    path: "{{ elastic_tls_ca_certificate_path }}"
+    provider: selfsigned
+    csr_content: "{{ _elastic_tls_ca_csr.csr }}"
+    privatekey_path: "{{ elastic_tls_ca_privatekey_path }}"
+    privatekey_passphrase: "{{ elastic_tls_ca_passphrase if elastic_tls_ca_passphrase | length > 0 else omit }}"
+    selfsigned_not_after: "+{{ elastic_tls_ca_days }}d"
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ elastic_tls_ca_host }}"
+  run_once: true
+  when:
+    - not _elastic_tls_ca_stat.results[1].stat.exists
+    - _elastic_tls_ca_ready | bool
+  no_log: "{{ elastic_tls_ca_passphrase | length > 0 }}"
 
 - name: Read the CA certificate
   ansible.builtin.slurp:
-    src: "{{ elastic_tls_ca_dir }}/ca/ca.crt"
-  register: elastic_tls_ca_cert
+    src: "{{ elastic_tls_ca_certificate_path }}"
+  register: _elastic_tls_ca_cert
   delegate_to: "{{ elastic_tls_ca_host }}"
   run_once: true
+  when: _elastic_tls_ca_ready | bool
+
+- name: Publish the CA certificate
+  ansible.builtin.set_fact:
+    elastic_tls_ca_certificate: "{{ _elastic_tls_ca_cert.content | b64decode }}"
+  when: _elastic_tls_ca_ready | bool
 
 - name: Save the CA certificate on the controller
   ansible.builtin.copy:
-    content: "{{ elastic_tls_ca_cert.content | b64decode }}"
+    content: "{{ elastic_tls_ca_certificate }}"
     dest: "{{ elastic_tls_fetch_ca_cert }}"
     mode: "0644"
   delegate_to: localhost
   become: false
   run_once: true
-  when: elastic_tls_fetch_ca_cert | length > 0
+  when:
+    - elastic_tls_fetch_ca_cert | length > 0
+    - _elastic_tls_ca_ready | bool
+
+- name: Install the CA certificate
+  ansible.builtin.copy:
+    content: "{{ elastic_tls_ca_certificate }}"
+    dest: "{{ elastic_tls_dir }}/certs/ca.crt"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - _elastic_tls_ca_ready | bool
+    - elastic_tls_install_ca | bool or _elastic_tls_certificates | length > 0
+
+- name: Issue each certificate
+  ansible.builtin.include_tasks: ca_certificate.yml
+  loop: "{{ _elastic_tls_certificates }}"
+  loop_control:
+    loop_var: elastic_tls_cert
+    label: "{{ elastic_tls_cert.name }}"

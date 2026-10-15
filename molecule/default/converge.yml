@@ -1,7 +1,18 @@
 ---
+# The published fact only lives for the play, so it is also written to a file
+# for verify.yml. The second converge (idempotence) must leave that file, like
+# everything else, unchanged.
 - name: Converge
   hosts: all
+  become: true
+  gather_facts: true
   tasks:
-    - name: Apply elastic_tls
+    - name: Apply the role
       ansible.builtin.include_role:
-        name: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') | basename }}"
+        name: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+
+    - name: Save the published fact
+      ansible.builtin.copy:
+        content: "{{ elastic_tls_ssl_certificates | to_nice_json }}\n"
+        dest: /root/elastic_tls_ssl_certificates.json
+        mode: "0600"

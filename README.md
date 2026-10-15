@@ -2,112 +2,167 @@
 
 [![CI](https://github.com/jmaughmer/ansible-role-elastic-tls/actions/workflows/ci.yml/badge.svg)](https://github.com/jmaughmer/ansible-role-elastic-tls/actions/workflows/ci.yml)
 
-This Ansible role creates a private certificate authority with `elasticsearch-certutil`, issues one PEM certificate per host, and configures Elastic Stack components to use them:
+This Ansible role issues TLS certificates for Elastic Stack hosts, from a private CA it creates and keeps or from Let's Encrypt, and publishes them as the host fact `elastic_tls_ssl_certificates`. The [elasticsearch](https://github.com/jmaughmer/ansible-role-elasticsearch), [kibana](https://github.com/jmaughmer/ansible-role-kibana), [logstash](https://github.com/jmaughmer/ansible-role-logstash) and [elastic_fleet](https://github.com/jmaughmer/ansible-role-elastic-fleet) roles read that fact, install the files and configure TLS.
 
-- **Elasticsearch**: transport (node-to-node) and HTTP TLS in `elasticsearch.yml`
-- **Kibana**: HTTPS for the Kibana server, plus trust of the CA for connections to Elasticsearch, in `kibana.yml`
-- **Logstash, Elastic Agent / Fleet Server, Filebeat, Metricbeat**: the role installs the CA, certificate and key, and you reference them from your own pipeline, agent or Beat configuration
+The role only writes certificates and keys below `elastic_tls_dir` (`/etc/pki/elastic-tls`), plus the CA on the CA host. It never edits `elasticsearch.yml`, `kibana.yml` or any other Elastic configuration, and never restarts a service: the consumer roles do that, in health-checked batches.
+
+## Quick start
+
+```yaml
+- name: Elasticsearch
+  hosts: elasticsearch
+  become: true
+  roles:
+    - role: elastic_tls        # first, in the same play
+    - role: elasticsearch
+```
+
+```yaml
+# group_vars/all/elastic-tls.yml
+elastic_tls_provider: ca
+elastic_tls_ca_common_name: "Example Corp Internal CA"
+elastic_tls_ca_passphrase: "{{ vault_elastic_tls_ca_passphrase }}"
+```
+
+With nothing else set, every host gets one certificate named after its inventory hostname, with its inventory name, FQDN, short hostname and default IPv4 address as subjectAltNames, for both server and client authentication. That is what the consumer roles look for by default.
+
+Add names, for example a load balancer or virtual address, with `elastic_tls_certificates`:
+
+```yaml
+# group_vars/fleet_server/main.yml
+elastic_tls_certificates:
+  - name: "{{ inventory_hostname }}"
+    dns:
+      - "{{ inventory_hostname }}"
+      - fleet.example.com
+    usage: [server, client]
+```
+
+It works on a bare host. Nothing Elastic needs to be installed first, so the role can run before the elasticsearch role on a new cluster.
+
+## What gets published
+
+After the role, each host has:
+
+```yaml
+elastic_tls_ssl_certificates:
+  - name: es-data-1.example.com
+    certificate: {path: /etc/pki/elastic-tls/certs/es-data-1.example.com.crt}
+    key: {path: /etc/pki/elastic-tls/private/es-data-1.example.com.key}
+    ca: {path: /etc/pki/elastic-tls/certs/ca.crt}
+```
+
+one entry per item in `elastic_tls_certificates`, and, with the private CA, `elastic_tls_ca_certificate` (the CA certificate as PEM text). The consumer roles read `ssl_certificates` first and `elastic_tls_ssl_certificates` after it, so a manually supplied entry with the same name always wins.
+
+| File | Owner, mode | Content |
+| --- | --- | --- |
+| `certs/<name>.crt` | `root:root 0644` | The certificate (with Let's Encrypt, the full chain) |
+| `private/<name>.key` | `root:root 0600` | Unencrypted PKCS#8 private key, made on the host |
+| `certs/ca.crt` | `root:root 0644` | The private CA's certificate. Also installed on hosts without certificates of their own unless `elastic_tls_install_ca: false` |
 
 ## How it works
 
-1. On the CA host (`elastic_tls_ca_host`, by default the first host in the `elasticsearch` group), the role runs `elasticsearch-certutil ca --pem` once. The CA is stored in `elastic_tls_ca_dir` (`/etc/elastic-tls`).
-2. For each host with components, the role writes a request spec (name, DNS/IP SANs, validity) on the CA host and runs `elasticsearch-certutil cert --pem`. If the spec changes, for example because a SAN was added, the certificate is reissued.
-3. The CA certificate, host certificate and key are copied into each component's `cert_dir` as `elastic-tls-ca.crt`, `elastic-tls.crt` and `elastic-tls.key`. The key is mode `0640`, owned by `root:<component group>`.
-4. Elasticsearch and Kibana configuration is updated, and the affected services are restarted.
+### Private CA (`elastic_tls_provider: ca`)
 
-Back up the CA host's `elastic_tls_ca_dir`. If you lose `ca/ca.key`, you have to reissue every certificate from a new CA.
+1. On `elastic_tls_ca_host` (by default the first host in the `elasticsearch` group; it does not have to be in the play), the role creates the CA key and a self-signed CA certificate once, in `elastic_tls_ca_dir` (`/etc/elastic-tls`). The key is PKCS#8, encrypted with `elastic_tls_ca_passphrase` when one is set. An existing CA is never replaced.
+2. Each host creates its own key and a certificate request. The CA host signs the request and only the certificate is copied back, so host keys never leave their host.
+3. A certificate is reissued when its names or usages change, when it was not signed by the current CA, when its key changes, or when it expires within `elastic_tls_renew_before_days` (30). Otherwise nothing changes.
+
+Back up `elastic_tls_ca_dir` on the CA host. Without `ca/ca.key`, every certificate has to be reissued from a new CA.
+
+Node certificates have `serverAuth` and `clientAuth`, `CA:FALSE`, and `digitalSignature, keyEncipherment` key usage, which Elasticsearch transport TLS needs.
+
+### Let's Encrypt (`elastic_tls_provider: letsencrypt`)
+
+The role requests certificates with `community.crypto.acme_certificate` and an account key per host:
+
+- **http-01**: challenge files are written to `elastic_tls_acme_webroot` on the host; a web server there must serve them on port 80 for every name in the certificate.
+- **dns-01**: set `elastic_tls_acme_dns_tasks` to a tasks file of yours. It is included with `elastic_tls_acme_dns_records` (`{fqdn: [txt values]}`) and `elastic_tls_acme_dns_state: present` before validation, and again with `absent` afterwards.
+
+You have to set `elastic_tls_acme_terms_agreed: true`. Let's Encrypt certificates are for servers only: they carry no `clientAuth` and no IP addresses, so the role refuses `usage: [client]` and `ip` entries with this provider. Elasticsearch node (transport) certificates have to come from the private CA; Let's Encrypt suits the Kibana or Fleet Server address that browsers and agents connect to. Each entry's `ca` is the system trust store, `elastic_tls_acme_ca_path`.
+
+The Let's Encrypt path is not exercised by the Molecule tests.
 
 ## Requirements
 
-- ansible-core 2.15 or later. The role uses only `ansible.builtin` modules.
-- Targets: RHEL, Rocky Linux or AlmaLinux 8 or 9.
-- Install the `elasticsearch` package on the CA host first, because it provides `elasticsearch-certutil`.
-- Install each component's package before running the role, so its service group (for example `elasticsearch` or `kibana`) already exists.
-- Run the role with `become: true` and gather facts, because the default SANs come from `ansible_facts`.
+- ansible-core 2.15 or later and the `community.crypto` collection 2.10 or later (`ansible-galaxy collection install -r requirements.yml`).
+- Targets and the CA host: RHEL, Rocky Linux or AlmaLinux 9 or 10. The role installs `python3-cryptography` on them (`elastic_tls_packages`); change that list if `ansible_python_interpreter` is not the platform Python.
+- Run with `become: true`, and gather facts unless every certificate lists its own `dns` and `ip`.
 
 ## Role variables
 
-See [defaults/main.yml](defaults/main.yml) for the full list. The variables you'll most often set are:
+See [defaults/main.yml](defaults/main.yml) for all of them.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `elastic_tls_components` | `[]` | Components on this host: `elasticsearch`, `kibana`, `logstash`, `elastic-agent`, `filebeat`, `metricbeat`. |
-| `elastic_tls_ca_host` | first host in `elasticsearch` | Host that keeps the CA and runs certutil. |
-| `elastic_tls_ca_dir` | `/etc/elastic-tls` | CA and certificate bundle directory on the CA host. |
-| `elastic_tls_ca_key_password` | `""` | Optional passphrase for the CA key. Store it in Vault. |
-| `elastic_tls_ca_days` / `elastic_tls_cert_days` | `3650` / `1095` | Validity periods. |
-| `elastic_tls_cert_extra_dns` / `elastic_tls_cert_extra_ip` | `[]` | Extra SANs, such as load balancer names or VIPs. Inventory name, FQDN, short hostname and default IPv4 are always included. |
-| `elastic_tls_cert_regenerate` | `false` | Set to `true` for one run to reissue every certificate. |
-| `elastic_tls_component_settings` | see defaults | Per-component `cert_dir`, `owner`, `group` and `service`. |
-| `elastic_tls_restart_services` | `true` | Restart component services when their TLS files or config change. |
+| `elastic_tls_provider` | `ca` | `ca` or `letsencrypt`. |
+| `elastic_tls_certificates` | one entry named after the host | Certificates for this host: `name`, `dns`, `ip`, `usage` (`server`, `client`), `days`. Missing keys take the defaults below. `[]` installs only the CA certificate. |
+| `elastic_tls_default_dns` / `elastic_tls_default_ip` | inventory name, FQDN, short hostname / default IPv4 | SANs for entries without `dns` / `ip`. |
+| `elastic_tls_dir` | `/etc/pki/elastic-tls` | Where certificates and keys are written on each host. |
+| `elastic_tls_key_type` | `RSA` | `RSA` (`elastic_tls_key_size`, 2048) or `ECC` (`elastic_tls_key_curve`, `secp256r1`). |
+| `elastic_tls_cert_days` | `1095` | Validity of private-CA certificates. |
+| `elastic_tls_renew_before_days` | `30` | Reissue certificates that expire sooner than this. |
+| `elastic_tls_ca_host` | first host in `elasticsearch` | Host that keeps the CA key and signs. |
+| `elastic_tls_ca_dir` | `/etc/elastic-tls` | CA directory on the CA host (`ca/ca.crt`, `ca/ca.key`); see also `elastic_tls_ca_certificate_path` and `elastic_tls_ca_privatekey_path`. |
+| `elastic_tls_ca_common_name` | `Elastic Stack CA` | Subject of a new CA. |
+| `elastic_tls_ca_passphrase` | `""` | Passphrase of the CA key. Store it in Vault. |
+| `elastic_tls_ca_days` | `3650` | Validity of a new CA certificate. |
 | `elastic_tls_fetch_ca_cert` | `""` | Controller path to save the CA certificate to, for clients. |
-| `elastic_tls_elasticsearch_transport_verification_mode` | `full` | `full`, `certificate` or `none`. |
-| `elastic_tls_elasticsearch_http_ssl` | `true` | Enable HTTPS on the REST API. |
-| `elastic_tls_elasticsearch_remove_autoconfig` | `true` | Remove the TLS settings and keystore passwords left by security auto-configuration. |
-| `elastic_tls_kibana_server_ssl` | `true` | Serve Kibana over HTTPS. |
-| `elastic_tls_kibana_elasticsearch_verification_mode` | `full` | How Kibana verifies Elasticsearch certificates. |
+| `elastic_tls_acme_*` | see defaults | Directory URL, contact e-mail, terms, challenge type, webroot, DNS tasks and CA bundle for Let's Encrypt. |
 
-Set `elastic_tls_elasticsearch_manage_config` or `elastic_tls_kibana_manage_config` to `false` if you only want the files deployed and manage the configuration yourself.
+## Using the certificates elsewhere
 
-### Elasticsearch security auto-configuration
-
-When the Elasticsearch 8+ package is installed, it writes `xpack.security.{http,transport}.ssl` blocks that point at PKCS#12 keystores, and stores their passwords in `elasticsearch.keystore`. With `elastic_tls_elasticsearch_remove_autoconfig: true`, the role removes only those nested SSL blocks and keystore passwords. Other auto-configured settings, such as `xpack.security.enabled`, `http.host` and `cluster.initial_master_nodes`, are left alone. The role's own settings go in a marked block, in flat-key form.
-
-If you have hand-written flat `xpack.security.*.ssl.*` lines outside the managed block, remove them. Otherwise Elasticsearch will refuse to start because of duplicate settings.
-
-### Restarts
-
-The handler restarts every changed host's services at once. Changing transport certificates on a running cluster this way restarts all nodes together. For a rolling change, run the role with `serial: 1`, or set `elastic_tls_restart_services: false` and restart the nodes yourself.
-
-## Example playbook
-
-```yaml
-# inventory/group_vars/elasticsearch.yml
-elastic_tls_components: [elasticsearch]
-
-# inventory/group_vars/kibana.yml
-elastic_tls_components: [kibana]
-
-# inventory/group_vars/logstash.yml
-elastic_tls_components: [logstash]
-
-# inventory/group_vars/fleet_server.yml
-elastic_tls_components: [elastic-agent]
-elastic_tls_cert_extra_dns: [fleet.example.com]
-```
-
-```yaml
-- name: Configure Elastic Stack TLS
-  hosts: elasticsearch:kibana:logstash:fleet_server
-  become: true
-  roles:
-    - role: jmaughmer.elastic_tls
-      vars:
-        elastic_tls_fetch_ca_cert: "{{ playbook_dir }}/files/elastic-ca.crt"
-```
-
-For components the role does not configure, point them at the deployed files. For example, a Logstash output:
+For software without a consumer role, point it at the published paths, for example a Logstash pipeline output:
 
 ```text
 output {
   elasticsearch {
     hosts => ["https://es01.example.com:9200"]
-    ssl_certificate_authorities => ["/etc/logstash/certs/elastic-tls-ca.crt"]
+    ssl_certificate_authorities => ["/etc/pki/elastic-tls/certs/ca.crt"]
   }
 }
 ```
 
-A Fleet Server install would use `--fleet-server-cert /etc/elastic-agent/certs/elastic-tls.crt --fleet-server-cert-key /etc/elastic-agent/certs/elastic-tls.key --certificate-authorities /etc/elastic-agent/certs/elastic-tls-ca.crt`.
+The key is readable by root only. A service running as another user needs its own copy with suitable ownership; the consumer roles make one.
+
+## Migrating from the certutil-based role
+
+Earlier versions of this role ran `elasticsearch-certutil`, copied files into each component's `certs` directory and edited `elasticsearch.yml` and `kibana.yml`. That conflicted with the elasticsearch and kibana roles, which template those files completely (and remove `/etc/elasticsearch/certs`), and its handler restarted every node at once. This version fails with a message naming any of the old variables that is still set, so an unmigrated inventory cannot silently stop getting certificates.
+
+1. **Keep the CA.** The CA paths are unchanged (`/etc/elastic-tls/ca/ca.crt` and `ca.key` on `elastic_tls_ca_host`, which still defaults to the first `elasticsearch` host), and an existing CA is never replaced, so existing trust keeps working. Set `elastic_tls_ca_passphrase` to the old `elastic_tls_ca_key_password`, or leave it empty if there was none. `elastic_tls_ca_common_name` only applies to a new CA.
+2. **Rename or remove the old variables:**
+
+   | Old | New |
+   | --- | --- |
+   | `elastic_tls_ca_key_password` | `elastic_tls_ca_passphrase` |
+   | `elastic_tls_cert_name` | `name` in `elastic_tls_certificates` |
+   | `elastic_tls_cert_extra_dns`, `elastic_tls_cert_extra_ip`, `elastic_tls_cert_dns`, `elastic_tls_cert_ip` | `dns` and `ip` in `elastic_tls_certificates`. A list you give replaces the defaults, so include the host's own names. |
+   | `elastic_tls_cert_regenerate` | Not needed: certificates are reissued when they change or near expiry. Delete a certificate file to force it. |
+   | `elastic_tls_components`, `elastic_tls_component_settings`, `elastic_tls_*_filename`, `elastic_tls_certutil` | Remove. Each consumer role installs the files itself. |
+   | `elastic_tls_restart_services` | Remove. The consumer roles restart in batches. |
+   | `elastic_tls_elasticsearch_*`, `elastic_tls_kibana_*` | Remove, and set TLS in the elasticsearch and kibana roles' own variables. Their templates replace the blocks this role wrote. |
+
+   `elastic_tls_ca_host`, `elastic_tls_ca_dir`, `elastic_tls_ca_days`, `elastic_tls_cert_days` and `elastic_tls_fetch_ca_cert` keep their meaning.
+3. **Run `elastic_tls` before the consumer role in the same play**, as in the quick start. Every host gets a new key and certificate from the same CA, and the consumer role rolls them out with its usual batched restart.
+4. **Clean up.** Files under `/etc/<component>/certs/elastic-tls*` and `/etc/elastic-tls/specs` and `/etc/elastic-tls/certs` on the CA host are no longer used or renewed. Remove them once nothing points at them; Logstash pipelines, Beats or agents configured by hand need their paths changed to `/etc/pki/elastic-tls/...` first.
 
 ## Testing
 
 ```bash
-pip install ansible-core molecule "molecule-plugins[docker]" docker ansible-lint yamllint
+pip install -r molecule/requirements.txt
 yamllint . && ansible-lint
-molecule test
+molecule test                              # MOLECULE_DISTRO=rockylinux10 for EL 10
 ```
 
-The Molecule scenario installs Elasticsearch on `es01` (its CA host) and uses a Kibana/Logstash stand-in, `kb01`. It then verifies the certificate chain, SANs, key permissions, the auto-configuration cleanup and the resulting `elasticsearch.yml` and `kibana.yml`. Set `MOLECULE_DISTRO=rockylinux8` to test EL8.
+[`molecule/default/`](molecule/default/) runs on three bare containers with rootless Podman: `es01` (in `elasticsearch`, so the CA host), `kb01` with two certificates, one of them server-only with its own names, and `client01` with none. Nothing Elastic is installed; [`prepare.yml`](molecule/default/prepare.yml) only adds the `openssl` command for verify. The sequence is converge, idempotence, check mode, then [`verify.yml`](molecule/default/verify.yml), which checks:
+
+- the published `elastic_tls_ssl_certificates` per host: names, and certificate, key and CA paths, and that it passes the elasticsearch role's preflight checks;
+- every certificate chains to the CA, its key is unencrypted PKCS#8, matches it and is `root:root 0600`;
+- extended key usage (server and client by default, server only where asked), `CA:FALSE`, default and explicit SANs;
+- the CA certificate is installed on every host, and only the CA host has the CA key, encrypted;
+- nothing was created under `/etc/elasticsearch`, `/etc/kibana` or `/etc/logstash`;
+- changing a certificate's names reissues it;
+- a variable of the certutil-based role makes the role fail.
 
 ## License
 

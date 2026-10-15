@@ -1,131 +1,121 @@
 ---
-# --- Certificate authority -------------------------------------------------
+# --- Provider --------------------------------------------------------------
 
-# Inventory host that keeps the CA and runs elasticsearch-certutil. The
-# elasticsearch package must already be installed there.
-elastic_tls_ca_host: "{{ (groups['elasticsearch'] | default(ansible_play_hosts_all))[0] }}"
+# Where certificates come from:
+#   ca           a private CA this role creates and keeps on elastic_tls_ca_host
+#   letsencrypt  an ACME CA such as Let's Encrypt (server certificates only)
+elastic_tls_provider: ca
 
-# Path to elasticsearch-certutil on the CA host.
-elastic_tls_certutil: /usr/share/elasticsearch/bin/elasticsearch-certutil
+# --- Certificates for this host --------------------------------------------
 
-# Directory on the CA host that holds the CA and the generated certificate bundles.
-elastic_tls_ca_dir: /etc/elastic-tls
+# Certificates to issue for this host. Each entry:
+#   name   entry name in elastic_tls_ssl_certificates and file name on the host
+#          (default: inventory_hostname)
+#   dns    DNS subjectAltNames (default: elastic_tls_default_dns)
+#   ip     IP subjectAltNames (default: elastic_tls_default_ip with the ca
+#          provider, none with letsencrypt)
+#   usage  any of server, client (default: [server, client] with the ca
+#          provider, [server] with letsencrypt). Elasticsearch transport TLS
+#          needs both.
+#   days   validity in days, ca provider only (default: elastic_tls_cert_days)
+# Set to [] on hosts that only need the CA certificate.
+elastic_tls_certificates:
+  - name: "{{ inventory_hostname }}"
 
-# Validity of the CA certificate, in days.
-elastic_tls_ca_days: 3650
-
-# Optional passphrase for the CA private key. Store it in Ansible Vault.
-elastic_tls_ca_key_password: ""
-
-# --- Host certificates -----------------------------------------------------
-
-# Validity of each host certificate, in days.
-elastic_tls_cert_days: 1095
-
-# Instance name passed to certutil. Must be unique per host.
-elastic_tls_cert_name: "{{ inventory_hostname }}"
-
-# Extra subjectAltName entries, added to the ones detected automatically.
-elastic_tls_cert_extra_dns: []
-elastic_tls_cert_extra_ip: []
-
-# DNS and IP subjectAltNames for the host certificate.
-elastic_tls_cert_dns: >-
-  {{ ([inventory_hostname,
-       ansible_facts['fqdn'] | default(''),
-       ansible_facts['hostname'] | default('')]
-      + elastic_tls_cert_extra_dns)
+# DNS subjectAltNames used when an entry has no dns list: the inventory name,
+# FQDN and short hostname, without IP addresses.
+elastic_tls_default_dns: >-
+  {{ [inventory_hostname,
+      ansible_facts['fqdn'] | default(''),
+      ansible_facts['hostname'] | default('')]
      | select
      | reject('match', '^[0-9.]+$')
      | reject('search', ':')
      | unique
      | list }}
-elastic_tls_cert_ip: >-
+
+# IP subjectAltNames used when an entry has no ip list: the default IPv4
+# address, and the inventory name when it is an IPv4 address.
+elastic_tls_default_ip: >-
   {{ ([ansible_facts['default_ipv4']['address'] | default('')]
-      + elastic_tls_cert_extra_ip)
+      + ([inventory_hostname] if inventory_hostname is match('^[0-9]+(\.[0-9]+){3}$') else []))
      | select
      | unique
      | list }}
 
-# Set to true for one run to reissue every host certificate from the existing CA.
-elastic_tls_cert_regenerate: false
+# Directory on each host for its certificates (certs/) and keys (private/).
+# Consumer roles copy from here into their own directories, so keep it outside
+# /etc/elasticsearch, /etc/kibana and the like.
+elastic_tls_dir: /etc/pki/elastic-tls
 
-# --- Deployment ------------------------------------------------------------
+# Private key algorithm for host certificates: RSA or ECC.
+elastic_tls_key_type: RSA
+# Key size for RSA keys.
+elastic_tls_key_size: 2048
+# Curve for ECC keys.
+elastic_tls_key_curve: secp256r1
 
-# Stack components on this host that receive the CA and host certificate.
-# Set this in group_vars/host_vars. Valid names are the keys of
-# elastic_tls_component_settings.
-elastic_tls_components: []
+# Validity of each host certificate, in days (ca provider).
+elastic_tls_cert_days: 1095
 
-# Where each component's files go, who owns them, and which service is
-# restarted when they change.
-elastic_tls_component_settings:
-  elasticsearch:
-    cert_dir: /etc/elasticsearch/certs
-    owner: root
-    group: elasticsearch
-    service: elasticsearch
-  kibana:
-    cert_dir: /etc/kibana/certs
-    owner: root
-    group: kibana
-    service: kibana
-  logstash:
-    cert_dir: /etc/logstash/certs
-    owner: root
-    group: logstash
-    service: logstash
-  elastic-agent:
-    cert_dir: /etc/elastic-agent/certs
-    owner: root
-    group: root
-    service: elastic-agent
-  filebeat:
-    cert_dir: /etc/filebeat/certs
-    owner: root
-    group: root
-    service: filebeat
-  metricbeat:
-    cert_dir: /etc/metricbeat/certs
-    owner: root
-    group: root
-    service: metricbeat
+# Reissue a certificate when it expires within this many days.
+elastic_tls_renew_before_days: 30
 
-# File names used inside each component's cert_dir.
-elastic_tls_ca_cert_filename: elastic-tls-ca.crt
-elastic_tls_cert_filename: elastic-tls.crt
-elastic_tls_key_filename: elastic-tls.key
+# Install the CA certificate on hosts without certificates of their own, so it
+# can be used as a trust anchor there.
+elastic_tls_install_ca: true
 
-# Restart the services of this host's components when their certificates or
-# configuration change.
-elastic_tls_restart_services: true
+# Packages that give the Python interpreter on the targets and the CA host the
+# cryptography library community.crypto needs. Change this when
+# ansible_python_interpreter is not the platform python.
+elastic_tls_packages:
+  - python3-cryptography
+
+# --- Private CA (elastic_tls_provider: ca) ---------------------------------
+
+# Inventory host that keeps the CA key and signs certificates. It does not have
+# to be in the play, and does not need any Elastic package.
+elastic_tls_ca_host: "{{ (groups['elasticsearch'] | default(ansible_play_hosts_all, true))[0] }}"
+
+# Directory on the CA host for the CA.
+elastic_tls_ca_dir: /etc/elastic-tls
+elastic_tls_ca_certificate_path: "{{ elastic_tls_ca_dir }}/ca/ca.crt"
+elastic_tls_ca_privatekey_path: "{{ elastic_tls_ca_dir }}/ca/ca.key"
+
+# Subject common name of a new CA. An existing CA is never replaced.
+elastic_tls_ca_common_name: Elastic Stack CA
+
+# Passphrase for the CA private key. Store it in Ansible Vault. An empty value
+# leaves the key unencrypted.
+elastic_tls_ca_passphrase: ""
+
+# Validity of a new CA certificate, in days.
+elastic_tls_ca_days: 3650
+
+# RSA key size of a new CA key.
+elastic_tls_ca_key_size: 4096
 
 # Path on the Ansible controller to save a copy of the CA certificate to.
 # Leave empty to skip.
 elastic_tls_fetch_ca_cert: ""
 
-# --- Elasticsearch configuration -------------------------------------------
+# --- ACME (elastic_tls_provider: letsencrypt) ------------------------------
 
-elastic_tls_elasticsearch_manage_config: true
-elastic_tls_elasticsearch_config: /etc/elasticsearch/elasticsearch.yml
-elastic_tls_elasticsearch_keystore: /usr/share/elasticsearch/bin/elasticsearch-keystore
-
-elastic_tls_elasticsearch_transport_ssl: true
-# full | certificate | none
-elastic_tls_elasticsearch_transport_verification_mode: full
-elastic_tls_elasticsearch_http_ssl: true
-
-# Remove the TLS settings written by Elasticsearch's security auto-configuration
-# (the nested xpack.security.*.ssl maps in elasticsearch.yml and their keystore
-# passwords) so they do not conflict with the settings this role manages.
-elastic_tls_elasticsearch_remove_autoconfig: true
-
-# --- Kibana configuration --------------------------------------------------
-
-elastic_tls_kibana_manage_config: true
-elastic_tls_kibana_config: /etc/kibana/kibana.yml
-
-# Serve Kibana over HTTPS using the host certificate.
-elastic_tls_kibana_server_ssl: true
-# full | certificate | none
-elastic_tls_kibana_elasticsearch_verification_mode: full
+elastic_tls_acme_directory: https://acme-v02.api.letsencrypt.org/directory
+# Contact address for the ACME account, for example admin@example.com.
+elastic_tls_acme_email: ""
+# Must be set to true to accept the CA's terms of service.
+elastic_tls_acme_terms_agreed: false
+# http-01 or dns-01.
+elastic_tls_acme_challenge: http-01
+# http-01: directory a web server on port 80 of this host serves as
+# http://<name>/ ; challenge files are written below .well-known/acme-challenge.
+elastic_tls_acme_webroot: /var/www/html
+# dns-01: a tasks file of yours that creates the TXT records. It is included
+# with elastic_tls_acme_dns_records ({fqdn: [values]}) and
+# elastic_tls_acme_dns_state: present, and
+# again with elastic_tls_acme_dns_state: absent afterwards.
+elastic_tls_acme_dns_tasks: ""
+# CA bundle published as each entry's ca. ACME certificates chain to a public
+# root, so this is the system trust store.
+elastic_tls_acme_ca_path: /etc/pki/tls/certs/ca-bundle.crt

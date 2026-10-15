@@ -1,117 +1,272 @@
 ---
-- name: Verify certificates
+- name: Verify the published fact and the files it points at
   hosts: all
+  become: true
   gather_facts: false
+  vars:
+    expected_names:
+      es01: [es01]
+      kb01: [kb01, kibana-public]
+      client01: []
   tasks:
-    - name: Check each component's certificate against the CA
+    - name: Read the fact saved by converge
+      ansible.builtin.slurp:
+        src: /root/elastic_tls_ssl_certificates.json
+      register: fact_raw
+
+    - name: Check the shape of elastic_tls_ssl_certificates
+      ansible.builtin.assert:
+        that:
+          - certs | map(attribute='name') | list == expected_names[inventory_hostname]
+          - certs | selectattr('certificate.path', 'defined') | list | length == certs | length
+          - certs | selectattr('key.path', 'defined') | list | length == certs | length
+          - certs | selectattr('ca.path', 'defined') | list | length == certs | length
+          - certs | map(attribute='ca.path') | unique | list in [[], ['/etc/pki/elastic-tls/certs/ca.crt']]
+          - certs | map(attribute='certificate.path') | reject('match', '^/etc/pki/elastic-tls/certs/') | list == []
+          - certs | map(attribute='key.path') | reject('match', '^/etc/pki/elastic-tls/private/') | list == []
+      vars:
+        certs: "{{ fact_raw.content | b64decode | from_json }}"
+
+    # The same checks ansible-role-elasticsearch's preflight makes on its entry.
+    - name: Check that the entry passes the elasticsearch role's preflight
+      ansible.builtin.assert:
+        that:
+          - entry | length > 0
+          - entry.certificate.content is defined or entry.certificate.path is defined
+          - entry.key.content is defined or entry.key.path is defined
+          - entry.ca.content is defined or entry.ca.path is defined
+      vars:
+        entry: >-
+          {{ fact_raw.content | b64decode | from_json
+             | selectattr('name', 'equalto', inventory_hostname) | first | default({}) }}
+      when: inventory_hostname != 'client01'
+
+    - name: Set the certificate list
+      ansible.builtin.set_fact:
+        certs: "{{ fact_raw.content | b64decode | from_json }}"
+
+    - name: Check that the CA certificate is installed
+      ansible.builtin.stat:
+        path: /etc/pki/elastic-tls/certs/ca.crt
+      register: ca_stat
+
+    - name: Check the CA certificate file
+      ansible.builtin.assert:
+        that:
+          - ca_stat.stat.exists
+          - ca_stat.stat.mode == '0644'
+
+    - name: Check the CA certificate's subject and constraints
       ansible.builtin.command:
-        argv:
-          - openssl
-          - verify
-          - -CAfile
-          - /etc/{{ item }}/certs/elastic-tls-ca.crt
-          - /etc/{{ item }}/certs/elastic-tls.crt
-      loop: "{{ elastic_tls_components }}"
+        argv: [openssl, x509, -noout, -subject, -ext, basicConstraints, -in, /etc/pki/elastic-tls/certs/ca.crt]
+      register: ca_text
+      changed_when: false
+      failed_when: >-
+        ca_text.rc != 0
+        or 'CN=Molecule Test CA' not in (ca_text.stdout | replace(' = ', '='))
+        or 'CA:TRUE' not in ca_text.stdout
+
+    - name: Check each certificate against the CA
+      ansible.builtin.command:
+        argv: [openssl, verify, -CAfile, "{{ item.ca.path }}", "{{ item.certificate.path }}"]
+      loop: "{{ certs }}"
+      loop_control:
+        label: "{{ item.name }}"
       changed_when: false
 
-    - name: Read the certificate's subjectAltNames
+    - name: Read each private key
+      ansible.builtin.slurp:
+        src: "{{ item.key.path }}"
+      loop: "{{ certs }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: keys
+      no_log: true
+
+    - name: Check that each private key is unencrypted PKCS#8
+      ansible.builtin.assert:
+        that:
+          - (item.content | b64decode) is match('-----BEGIN PRIVATE KEY-----')
+        quiet: true
+      loop: "{{ keys.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      no_log: true
+
+    - name: Check that each private key matches its certificate
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          test "$(openssl x509 -noout -pubkey -in {{ item.certificate.path }} | sha256sum)" =
+          "$(openssl pkey -pubout -in {{ item.key.path }} | sha256sum)"
+        executable: /bin/bash
+      loop: "{{ certs }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+
+    - name: Stat each private key
+      ansible.builtin.stat:
+        path: "{{ item.key.path }}"
+      loop: "{{ certs }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: key_stats
+
+    - name: Check private key permissions
+      ansible.builtin.assert:
+        that:
+          - item.stat.mode == '0600'
+          - item.stat.pw_name == 'root'
+          - item.stat.gr_name == 'root'
+      loop: "{{ key_stats.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Read each certificate's extensions
+      ansible.builtin.command:
+        argv: [openssl, x509, -noout, -ext, "subjectAltName,extendedKeyUsage,basicConstraints", -in, "{{ item.certificate.path }}"]
+      loop: "{{ certs }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: exts
+      changed_when: false
+
+    - name: Check each certificate's extended key usage
+      ansible.builtin.assert:
+        that:
+          - "'TLS Web Server Authentication' in item.stdout"
+          - "'TLS Web Client Authentication' in item.stdout or item.item.name == 'kibana-public'"
+          - "'TLS Web Client Authentication' not in item.stdout or item.item.name != 'kibana-public'"
+          - "'CA:FALSE' in item.stdout"
+      loop: "{{ exts.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Check the default subjectAltNames
+      ansible.builtin.assert:
+        that:
+          - ('DNS:' ~ inventory_hostname) in item.stdout
+          - "'IP Address:' in item.stdout"
+      loop: "{{ exts.results | rejectattr('item.name', 'equalto', 'kibana-public') | list }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Check the explicit subjectAltNames
+      ansible.builtin.assert:
+        that:
+          - "'DNS:kibana.example.test' in item.stdout"
+          - "'DNS:kb01' not in item.stdout"
+          - "'IP Address:' not in item.stdout"
+      loop: "{{ exts.results | selectattr('item.name', 'equalto', 'kibana-public') | list }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Look for files the role must not create
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/elasticsearch
+        - /etc/kibana
+        - /etc/logstash
+      register: forbidden
+
+    - name: Check that no Elastic directory was touched
+      ansible.builtin.assert:
+        that:
+          - forbidden.results | selectattr('stat.exists') | list == []
+
+- name: Verify the CA host
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Stat the CA key
+      ansible.builtin.stat:
+        path: /etc/elastic-tls/ca/ca.key
+      register: ca_key
+
+    - name: Check that only the CA host holds the CA key
+      ansible.builtin.assert:
+        that:
+          - ca_key.stat.exists == (inventory_hostname == 'es01')
+
+    - name: Read the CA key header
+      ansible.builtin.command:
+        argv: [head, -n1, /etc/elastic-tls/ca/ca.key]
+      register: ca_key_head
+      changed_when: false
+      when: inventory_hostname == 'es01'
+
+    - name: Check that the CA key is encrypted with the passphrase
+      ansible.builtin.assert:
+        that:
+          - ca_key_head.stdout == '-----BEGIN ENCRYPTED PRIVATE KEY-----'
+          - ca_key.stat.mode == '0600'
+      when: inventory_hostname == 'es01'
+
+- name: Verify that changing a certificate's names reissues it
+  hosts: kb01
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Fingerprint the current certificate
+      ansible.builtin.command:
+        argv: [openssl, x509, -noout, -fingerprint, -sha256, -in, /etc/pki/elastic-tls/certs/kibana-public.crt]
+      register: before
+      changed_when: false
+
+    - name: Apply the role with an extra name
+      ansible.builtin.include_role:
+        name: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+      vars:
+        elastic_tls_certificates:
+          - {}
+          - name: kibana-public
+            dns: [kibana.example.test, kibana2.example.test]
+            ip: []
+            usage: [server]
+
+    - name: Read the new certificate
       ansible.builtin.command:
         argv:
           - openssl
           - x509
           - -noout
+          - -fingerprint
+          - -sha256
           - -ext
           - subjectAltName
           - -in
-          - /etc/{{ elastic_tls_components[0] }}/certs/elastic-tls.crt
-      register: san
+          - /etc/pki/elastic-tls/certs/kibana-public.crt
+      register: after
       changed_when: false
 
-    - name: Check the subjectAltNames
+    - name: Check that the certificate was reissued with the new name
       ansible.builtin.assert:
         that:
-          - ("DNS:" ~ inventory_hostname) in san.stdout
-          - ("DNS:" ~ inventory_hostname ~ ".example.test") in san.stdout
+          - after.stdout_lines[0] != before.stdout
+          - "'DNS:kibana2.example.test' in after.stdout"
 
-    - name: Check that the private key matches the certificate
-      ansible.builtin.shell:
-        cmd: >-
-          set -o pipefail;
-          test "$(openssl x509 -noout -pubkey -in {{ cert_dir }}/elastic-tls.crt | sha256sum)" =
-          "$(openssl pkey -pubout -in {{ cert_dir }}/elastic-tls.key | sha256sum)"
-        executable: /bin/bash
-      vars:
-        cert_dir: /etc/{{ elastic_tls_components[0] }}/certs
-      changed_when: false
-
-    - name: Stat the private keys
-      ansible.builtin.stat:
-        path: /etc/{{ item }}/certs/elastic-tls.key
-      loop: "{{ elastic_tls_components }}"
-      register: keys
-
-    - name: Check private key permissions
-      ansible.builtin.assert:
-        that:
-          - item.stat.mode == '0640'
-          - item.stat.pw_name == 'root'
-          - item.stat.gr_name == item.item
-      loop: "{{ keys.results }}"
-      loop_control:
-        label: "{{ item.item }}"
-
-- name: Verify Elasticsearch configuration
-  hosts: elasticsearch
+- name: Verify that variables of the certutil-based role are refused
+  hosts: client01
+  become: true
   gather_facts: false
   tasks:
-    - name: Read elasticsearch.yml
-      ansible.builtin.slurp:
-        src: /etc/elasticsearch/elasticsearch.yml
-      register: es_config_raw
+    - name: Apply the role with elastic_tls_components set
+      block:
+        - name: Apply the role
+          ansible.builtin.include_role:
+            name: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+          vars:
+            elastic_tls_components: [kibana]
 
-    - name: Check elasticsearch.yml
-      ansible.builtin.assert:
-        that:
-          - es_config is not search('(?m)^xpack\.security\.(http|transport)\.ssl:\s*$')
-          - es_config is search('(?m)^xpack\.security\.transport\.ssl\.certificate:\s*/etc/elasticsearch/certs/elastic-tls\.crt$')
-          - es_config is search('(?m)^xpack\.security\.http\.ssl\.key:\s*/etc/elasticsearch/certs/elastic-tls\.key$')
-      vars:
-        es_config: "{{ es_config_raw.content | b64decode }}"
-
-    - name: Check that elasticsearch.yml is valid YAML without duplicate keys
-      ansible.builtin.assert:
-        that:
-          - (es_config_raw.content | b64decode | from_yaml)['xpack.security.http.ssl.enabled']
-
-    - name: List keystore entries
-      ansible.builtin.command:
-        argv:
-          - /usr/share/elasticsearch/bin/elasticsearch-keystore
-          - list
-      register: keystore
-      changed_when: false
-
-    - name: Check that auto-configured keystore passwords are gone
-      ansible.builtin.assert:
-        that:
-          - keystore.stdout_lines | select('search', 'ssl\.(keystore|truststore)\.secure_password') | list | length == 0
-
-- name: Verify Kibana configuration
-  hosts: kibana
-  gather_facts: false
-  tasks:
-    - name: Read kibana.yml
-      ansible.builtin.slurp:
-        src: /etc/kibana/kibana.yml
-      register: kb_config_raw
-
-    - name: Check kibana.yml
-      ansible.builtin.assert:
-        that:
-          - kb_config['server.ssl.enabled'] is true
-          - kb_config['server.ssl.certificate'] == '/etc/kibana/certs/elastic-tls.crt'
-          - kb_config['server.ssl.key'] == '/etc/kibana/certs/elastic-tls.key'
-          - kb_config['elasticsearch.ssl.certificateAuthorities'] == ['/etc/kibana/certs/elastic-tls-ca.crt']
-          - kb_config['elasticsearch.ssl.verificationMode'] == 'full'
-      vars:
-        kb_config: "{{ kb_config_raw.content | b64decode | from_yaml }}"
+        - name: Fail, because the role should have refused
+          ansible.builtin.fail:
+            msg: The role accepted elastic_tls_components.
+      rescue:
+        - name: Check that the role refused for the right reason
+          ansible.builtin.assert:
+            that:
+              - "'certutil-based' in ansible_failed_result.msg"
+              - "'elastic_tls_components' in ansible_failed_result.msg"
