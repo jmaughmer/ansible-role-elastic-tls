@@ -1,0 +1,66 @@
+---
+- name: Prepare all hosts
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Install openssl
+      ansible.builtin.dnf:
+        name: openssl
+        state: present
+
+- name: Install Elasticsearch
+  hosts: elasticsearch
+  gather_facts: false
+  vars:
+    elastic_major_version: 9
+  tasks:
+    - name: Import the Elastic signing key
+      ansible.builtin.rpm_key:
+        key: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+        state: present
+
+    - name: Add the Elastic repository
+      ansible.builtin.yum_repository:
+        name: elastic
+        description: Elastic {{ elastic_major_version }}.x
+        baseurl: https://artifacts.elastic.co/packages/{{ elastic_major_version }}.x/yum
+        gpgcheck: true
+        gpgkey: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+
+    # The package's post-install step runs security auto-configuration, which
+    # gives the role's cleanup tasks something real to remove.
+    - name: Install the elasticsearch package
+      ansible.builtin.dnf:
+        name: elasticsearch
+        state: present
+
+- name: Stand in for Kibana and Logstash
+  hosts: kibana
+  gather_facts: false
+  tasks:
+    - name: Create service groups
+      ansible.builtin.group:
+        name: "{{ item }}"
+        system: true
+      loop:
+        - kibana
+        - logstash
+
+    - name: Create /etc/kibana
+      ansible.builtin.file:
+        path: /etc/kibana
+        state: directory
+        mode: "0755"
+
+    - name: Write a kibana.yml like the one enrollment leaves behind
+      ansible.builtin.copy:
+        dest: /etc/kibana/kibana.yml
+        mode: "0660"
+        group: kibana
+        force: false
+        content: |
+          #server.ssl.enabled: false
+          server.host: 0.0.0.0
+          # This section was automatically generated during setup.
+          elasticsearch.hosts: ['https://es01:9200']
+          elasticsearch.ssl.certificateAuthorities: [/var/lib/kibana/ca_1700000000000.crt]

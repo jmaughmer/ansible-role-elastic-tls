@@ -1,0 +1,19 @@
+---
+- name: Gather service facts
+  ansible.builtin.service_facts:
+  listen: elastic_tls restart services
+  when: elastic_tls_restart_services | bool
+
+- name: Restart Elastic Stack services
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: restarted
+  loop: >-
+    {{ elastic_tls_components
+       | map('extract', elastic_tls_component_settings, 'service')
+       | unique
+       | list }}
+  listen: elastic_tls restart services
+  when:
+    - elastic_tls_restart_services | bool
+    - (item ~ '.service') in ansible_facts.services

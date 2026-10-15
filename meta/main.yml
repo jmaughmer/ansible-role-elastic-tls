@@ -1,0 +1,26 @@
+---
+galaxy_info:
+  role_name: elastic_tls
+  namespace: jmaughmer
+  author: Justin Maughmer
+  description: >-
+    Issue TLS certificates from an elasticsearch-certutil CA and configure
+    Elasticsearch, Kibana, Logstash, Elastic Agent and Beats to use them.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: EL
+      versions:
+        - "8"
+        - "9"
+  galaxy_tags:
+    - elastic
+    - elasticsearch
+    - kibana
+    - logstash
+    - tls
+    - ssl
+    - certificates
+    - security
+
+dependencies: []

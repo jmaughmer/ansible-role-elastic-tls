@@ -1,0 +1,22 @@
+---
+# kibana.yml uses flat keys, so each setting is replaced in place. This also
+# overrides the elasticsearch.ssl.certificateAuthorities line written by
+# Kibana's enrollment setup.
+
+- name: Configure TLS in kibana.yml
+  ansible.builtin.lineinfile:
+    path: "{{ elastic_tls_kibana_config }}"
+    regexp: '^\s*{{ item.key | regex_escape }}:'
+    line: "{{ item.key }}: {{ item.value }}"
+  loop: "{{ elastic_tls_kibana_settings | dict2items }}"
+  vars:
+    elastic_tls_kb_dir: "{{ elastic_tls_component_settings['kibana'].cert_dir }}"
+    elastic_tls_kibana_settings: >-
+      {{ {'elasticsearch.ssl.certificateAuthorities':
+            '["' ~ elastic_tls_kb_dir ~ '/' ~ elastic_tls_ca_cert_filename ~ '"]',
+          'elasticsearch.ssl.verificationMode': elastic_tls_kibana_elasticsearch_verification_mode}
+         | combine({'server.ssl.enabled': 'true',
+                    'server.ssl.certificate': elastic_tls_kb_dir ~ '/' ~ elastic_tls_cert_filename,
+                    'server.ssl.key': elastic_tls_kb_dir ~ '/' ~ elastic_tls_key_filename}
+                   if elastic_tls_kibana_server_ssl | bool else {}) }}
+  notify: elastic_tls restart services

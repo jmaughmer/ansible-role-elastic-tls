@@ -1,0 +1,27 @@
+---
+- name: Check that the CA host is in the inventory
+  ansible.builtin.assert:
+    that:
+      - elastic_tls_ca_host in hostvars
+    fail_msg: "elastic_tls_ca_host '{{ elastic_tls_ca_host }}' is not an inventory host."
+    quiet: true
+  run_once: true
+
+- name: Check that every component is known
+  ansible.builtin.assert:
+    that:
+      - elastic_tls_components | difference(elastic_tls_component_settings.keys() | list) | length == 0
+    fail_msg: >-
+      Unknown component(s) {{ elastic_tls_components | difference(elastic_tls_component_settings.keys() | list) }}.
+      Valid names: {{ elastic_tls_component_settings.keys() | list }}.
+    quiet: true
+
+- name: Check that the host certificate has at least one subjectAltName
+  ansible.builtin.assert:
+    that:
+      - (elastic_tls_cert_dns | length + elastic_tls_cert_ip | length) > 0
+    fail_msg: >-
+      No DNS or IP subjectAltNames found for {{ inventory_hostname }}. Gather facts
+      or set elastic_tls_cert_extra_dns / elastic_tls_cert_extra_ip.
+    quiet: true
+  when: elastic_tls_components | length > 0

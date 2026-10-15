@@ -1,0 +1,131 @@
+---
+# --- Certificate authority -------------------------------------------------
+
+# Inventory host that keeps the CA and runs elasticsearch-certutil. The
+# elasticsearch package must already be installed there.
+elastic_tls_ca_host: "{{ (groups['elasticsearch'] | default(ansible_play_hosts_all))[0] }}"
+
+# Path to elasticsearch-certutil on the CA host.
+elastic_tls_certutil: /usr/share/elasticsearch/bin/elasticsearch-certutil
+
+# Directory on the CA host that holds the CA and the generated certificate bundles.
+elastic_tls_ca_dir: /etc/elastic-tls
+
+# Validity of the CA certificate, in days.
+elastic_tls_ca_days: 3650
+
+# Optional passphrase for the CA private key. Store it in Ansible Vault.
+elastic_tls_ca_key_password: ""
+
+# --- Host certificates -----------------------------------------------------
+
+# Validity of each host certificate, in days.
+elastic_tls_cert_days: 1095
+
+# Instance name passed to certutil. Must be unique per host.
+elastic_tls_cert_name: "{{ inventory_hostname }}"
+
+# Extra subjectAltName entries, added to the ones detected automatically.
+elastic_tls_cert_extra_dns: []
+elastic_tls_cert_extra_ip: []
+
+# DNS and IP subjectAltNames for the host certificate.
+elastic_tls_cert_dns: >-
+  {{ ([inventory_hostname,
+       ansible_facts['fqdn'] | default(''),
+       ansible_facts['hostname'] | default('')]
+      + elastic_tls_cert_extra_dns)
+     | select
+     | reject('match', '^[0-9.]+$')
+     | reject('search', ':')
+     | unique
+     | list }}
+elastic_tls_cert_ip: >-
+  {{ ([ansible_facts['default_ipv4']['address'] | default('')]
+      + elastic_tls_cert_extra_ip)
+     | select
+     | unique
+     | list }}
+
+# Set to true for one run to reissue every host certificate from the existing CA.
+elastic_tls_cert_regenerate: false
+
+# --- Deployment ------------------------------------------------------------
+
+# Stack components on this host that receive the CA and host certificate.
+# Set this in group_vars/host_vars. Valid names are the keys of
+# elastic_tls_component_settings.
+elastic_tls_components: []
+
+# Where each component's files go, who owns them, and which service is
+# restarted when they change.
+elastic_tls_component_settings:
+  elasticsearch:
+    cert_dir: /etc/elasticsearch/certs
+    owner: root
+    group: elasticsearch
+    service: elasticsearch
+  kibana:
+    cert_dir: /etc/kibana/certs
+    owner: root
+    group: kibana
+    service: kibana
+  logstash:
+    cert_dir: /etc/logstash/certs
+    owner: root
+    group: logstash
+    service: logstash
+  elastic-agent:
+    cert_dir: /etc/elastic-agent/certs
+    owner: root
+    group: root
+    service: elastic-agent
+  filebeat:
+    cert_dir: /etc/filebeat/certs
+    owner: root
+    group: root
+    service: filebeat
+  metricbeat:
+    cert_dir: /etc/metricbeat/certs
+    owner: root
+    group: root
+    service: metricbeat
+
+# File names used inside each component's cert_dir.
+elastic_tls_ca_cert_filename: elastic-tls-ca.crt
+elastic_tls_cert_filename: elastic-tls.crt
+elastic_tls_key_filename: elastic-tls.key
+
+# Restart the services of this host's components when their certificates or
+# configuration change.
+elastic_tls_restart_services: true
+
+# Path on the Ansible controller to save a copy of the CA certificate to.
+# Leave empty to skip.
+elastic_tls_fetch_ca_cert: ""
+
+# --- Elasticsearch configuration -------------------------------------------
+
+elastic_tls_elasticsearch_manage_config: true
+elastic_tls_elasticsearch_config: /etc/elasticsearch/elasticsearch.yml
+elastic_tls_elasticsearch_keystore: /usr/share/elasticsearch/bin/elasticsearch-keystore
+
+elastic_tls_elasticsearch_transport_ssl: true
+# full | certificate | none
+elastic_tls_elasticsearch_transport_verification_mode: full
+elastic_tls_elasticsearch_http_ssl: true
+
+# Remove the TLS settings written by Elasticsearch's security auto-configuration
+# (the nested xpack.security.*.ssl maps in elasticsearch.yml and their keystore
+# passwords) so they do not conflict with the settings this role manages.
+elastic_tls_elasticsearch_remove_autoconfig: true
+
+# --- Kibana configuration --------------------------------------------------
+
+elastic_tls_kibana_manage_config: true
+elastic_tls_kibana_config: /etc/kibana/kibana.yml
+
+# Serve Kibana over HTTPS using the host certificate.
+elastic_tls_kibana_server_ssl: true
+# full | certificate | none
+elastic_tls_kibana_elasticsearch_verification_mode: full

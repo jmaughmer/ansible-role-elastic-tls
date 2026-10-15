@@ -1,0 +1,51 @@
+---
+dependency:
+  name: galaxy
+  options:
+    requirements-file: molecule/default/requirements.yml
+
+driver:
+  name: docker
+
+platforms:
+  - name: es01
+    image: "geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    command: ""
+    cgroupns_mode: host
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    groups:
+      - elasticsearch
+  - name: kb01
+    image: "geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    command: ""
+    cgroupns_mode: host
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    groups:
+      - kibana
+
+provisioner:
+  name: ansible
+  inventory:
+    group_vars:
+      all:
+        # The containers do not run the Elastic services.
+        elastic_tls_restart_services: false
+        elastic_tls_cert_extra_dns:
+          - "{{ inventory_hostname }}.example.test"
+    host_vars:
+      es01:
+        elastic_tls_components:
+          - elasticsearch
+      kb01:
+        elastic_tls_components:
+          - kibana
+          - logstash
+
+verifier:
+  name: ansible

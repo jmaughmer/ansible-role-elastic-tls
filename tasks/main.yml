@@ -1,0 +1,28 @@
+---
+- name: Validate settings
+  ansible.builtin.import_tasks: validate.yml
+
+- name: Create the certificate authority
+  ansible.builtin.import_tasks: ca.yml
+
+- name: Issue the host certificate
+  ansible.builtin.import_tasks: certificate.yml
+  when: elastic_tls_components | length > 0
+
+- name: Deploy certificates for each component
+  ansible.builtin.include_tasks: deploy.yml
+  loop: "{{ elastic_tls_components }}"
+  loop_control:
+    loop_var: elastic_tls_component
+
+- name: Configure Elasticsearch
+  ansible.builtin.include_tasks: elasticsearch.yml
+  when:
+    - "'elasticsearch' in elastic_tls_components"
+    - elastic_tls_elasticsearch_manage_config | bool
+
+- name: Configure Kibana
+  ansible.builtin.include_tasks: kibana.yml
+  when:
+    - "'kibana' in elastic_tls_components"
+    - elastic_tls_kibana_manage_config | bool

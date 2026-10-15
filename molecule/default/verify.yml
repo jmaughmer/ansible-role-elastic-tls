@@ -1,0 +1,117 @@
+---
+- name: Verify certificates
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Check each component's certificate against the CA
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - verify
+          - -CAfile
+          - /etc/{{ item }}/certs/elastic-tls-ca.crt
+          - /etc/{{ item }}/certs/elastic-tls.crt
+      loop: "{{ elastic_tls_components }}"
+      changed_when: false
+
+    - name: Read the certificate's subjectAltNames
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -noout
+          - -ext
+          - subjectAltName
+          - -in
+          - /etc/{{ elastic_tls_components[0] }}/certs/elastic-tls.crt
+      register: san
+      changed_when: false
+
+    - name: Check the subjectAltNames
+      ansible.builtin.assert:
+        that:
+          - ("DNS:" ~ inventory_hostname) in san.stdout
+          - ("DNS:" ~ inventory_hostname ~ ".example.test") in san.stdout
+
+    - name: Check that the private key matches the certificate
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          test "$(openssl x509 -noout -pubkey -in {{ cert_dir }}/elastic-tls.crt | sha256sum)" =
+          "$(openssl pkey -pubout -in {{ cert_dir }}/elastic-tls.key | sha256sum)"
+        executable: /bin/bash
+      vars:
+        cert_dir: /etc/{{ elastic_tls_components[0] }}/certs
+      changed_when: false
+
+    - name: Stat the private keys
+      ansible.builtin.stat:
+        path: /etc/{{ item }}/certs/elastic-tls.key
+      loop: "{{ elastic_tls_components }}"
+      register: keys
+
+    - name: Check private key permissions
+      ansible.builtin.assert:
+        that:
+          - item.stat.mode == '0640'
+          - item.stat.pw_name == 'root'
+          - item.stat.gr_name == item.item
+      loop: "{{ keys.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+- name: Verify Elasticsearch configuration
+  hosts: elasticsearch
+  gather_facts: false
+  tasks:
+    - name: Read elasticsearch.yml
+      ansible.builtin.slurp:
+        src: /etc/elasticsearch/elasticsearch.yml
+      register: es_config_raw
+
+    - name: Check elasticsearch.yml
+      ansible.builtin.assert:
+        that:
+          - es_config is not search('(?m)^xpack\.security\.(http|transport)\.ssl:\s*$')
+          - es_config is search('(?m)^xpack\.security\.transport\.ssl\.certificate:\s*/etc/elasticsearch/certs/elastic-tls\.crt$')
+          - es_config is search('(?m)^xpack\.security\.http\.ssl\.key:\s*/etc/elasticsearch/certs/elastic-tls\.key$')
+      vars:
+        es_config: "{{ es_config_raw.content | b64decode }}"
+
+    - name: Check that elasticsearch.yml is valid YAML without duplicate keys
+      ansible.builtin.assert:
+        that:
+          - (es_config_raw.content | b64decode | from_yaml)['xpack.security.http.ssl.enabled']
+
+    - name: List keystore entries
+      ansible.builtin.command:
+        argv:
+          - /usr/share/elasticsearch/bin/elasticsearch-keystore
+          - list
+      register: keystore
+      changed_when: false
+
+    - name: Check that auto-configured keystore passwords are gone
+      ansible.builtin.assert:
+        that:
+          - keystore.stdout_lines | select('search', 'ssl\.(keystore|truststore)\.secure_password') | list | length == 0
+
+- name: Verify Kibana configuration
+  hosts: kibana
+  gather_facts: false
+  tasks:
+    - name: Read kibana.yml
+      ansible.builtin.slurp:
+        src: /etc/kibana/kibana.yml
+      register: kb_config_raw
+
+    - name: Check kibana.yml
+      ansible.builtin.assert:
+        that:
+          - kb_config['server.ssl.enabled'] is true
+          - kb_config['server.ssl.certificate'] == '/etc/kibana/certs/elastic-tls.crt'
+          - kb_config['server.ssl.key'] == '/etc/kibana/certs/elastic-tls.key'
+          - kb_config['elasticsearch.ssl.certificateAuthorities'] == ['/etc/kibana/certs/elastic-tls-ca.crt']
+          - kb_config['elasticsearch.ssl.verificationMode'] == 'full'
+      vars:
+        kb_config: "{{ kb_config_raw.content | b64decode | from_yaml }}"

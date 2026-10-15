@@ -1,0 +1,63 @@
+---
+# Everything in this file runs once, on the CA host.
+
+- name: Install unzip on the CA host
+  ansible.builtin.package:
+    name: unzip
+    state: present
+  delegate_to: "{{ elastic_tls_ca_host }}"
+  run_once: true
+
+- name: Create the CA directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - "{{ elastic_tls_ca_dir }}"
+    - "{{ elastic_tls_ca_dir }}/specs"
+    - "{{ elastic_tls_ca_dir }}/certs"
+  delegate_to: "{{ elastic_tls_ca_host }}"
+  run_once: true
+
+- name: Generate the CA
+  ansible.builtin.command:
+    argv: >-
+      {{ [elastic_tls_certutil, 'ca', '--silent', '--pem',
+          '--days', elastic_tls_ca_days | string,
+          '--out', elastic_tls_ca_dir ~ '/ca.zip']
+         + (['--pass', elastic_tls_ca_key_password] if elastic_tls_ca_key_password | length > 0 else []) }}
+    creates: "{{ elastic_tls_ca_dir }}/ca.zip"
+  delegate_to: "{{ elastic_tls_ca_host }}"
+  run_once: true
+  no_log: "{{ elastic_tls_ca_key_password | length > 0 }}"
+
+- name: Extract the CA
+  ansible.builtin.unarchive:
+    src: "{{ elastic_tls_ca_dir }}/ca.zip"
+    dest: "{{ elastic_tls_ca_dir }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "u=rwX,go="
+  delegate_to: "{{ elastic_tls_ca_host }}"
+  run_once: true
+
+- name: Read the CA certificate
+  ansible.builtin.slurp:
+    src: "{{ elastic_tls_ca_dir }}/ca/ca.crt"
+  register: elastic_tls_ca_cert
+  delegate_to: "{{ elastic_tls_ca_host }}"
+  run_once: true
+
+- name: Save the CA certificate on the controller
+  ansible.builtin.copy:
+    content: "{{ elastic_tls_ca_cert.content | b64decode }}"
+    dest: "{{ elastic_tls_fetch_ca_cert }}"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: elastic_tls_fetch_ca_cert | length > 0
