@@ -118,4 +118,6 @@ elastic_tls_acme_webroot: /var/www/html
 elastic_tls_acme_dns_tasks: ""
 # CA bundle published as each entry's ca. ACME certificates chain to a public
 # root, so this is the system trust store.
-elastic_tls_acme_ca_path: /etc/pki/tls/certs/ca-bundle.crt
+elastic_tls_acme_ca_path: >-
+  {{ '/etc/ssl/certs/ca-certificates.crt' if ansible_facts['os_family'] | default('') == 'Debian'
+     else '/etc/pki/tls/certs/ca-bundle.crt' }}

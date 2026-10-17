@@ -7,13 +7,30 @@
 # left behind by the certutil-based version of this role (same paths) keeps
 # being used.
 
+# apt updates its package index first, as a fresh Ubuntu image has none. The
+# CA host may not be in the play: without its facts the generic package module
+# is used.
 - name: Install the cryptography library on the CA host
   ansible.builtin.package:
     name: "{{ elastic_tls_packages }}"
     state: present
   delegate_to: "{{ elastic_tls_ca_host }}"
   run_once: true
-  when: elastic_tls_packages | length > 0
+  when:
+    - elastic_tls_packages | length > 0
+    - _elastic_tls_ca_os_family != 'Debian'
+
+- name: Install the cryptography library on the CA host (apt)
+  ansible.builtin.apt:
+    name: "{{ elastic_tls_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  delegate_to: "{{ elastic_tls_ca_host }}"
+  run_once: true
+  when:
+    - elastic_tls_packages | length > 0
+    - _elastic_tls_ca_os_family == 'Debian'
 
 - name: Create the CA directories
   ansible.builtin.file:

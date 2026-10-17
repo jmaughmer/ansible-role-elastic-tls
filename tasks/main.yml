@@ -7,11 +7,24 @@
 - name: Validate settings
   ansible.builtin.import_tasks: validate.yml
 
+# apt needs a package index first, and a fresh Ubuntu image has none.
 - name: Install the cryptography library
   ansible.builtin.package:
     name: "{{ elastic_tls_packages }}"
     state: present
-  when: elastic_tls_packages | length > 0
+  when:
+    - elastic_tls_packages | length > 0
+    - ansible_facts['os_family'] | default('') != 'Debian'
+
+- name: Install the cryptography library (apt)
+  ansible.builtin.apt:
+    name: "{{ elastic_tls_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when:
+    - elastic_tls_packages | length > 0
+    - ansible_facts['os_family'] | default('') == 'Debian'
 
 - name: Create the certificate directories
   ansible.builtin.file:
