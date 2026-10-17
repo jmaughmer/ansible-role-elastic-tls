@@ -77,14 +77,14 @@ The role requests certificates with `community.crypto.acme_certificate` and an a
 - **http-01**: challenge files are written to `elastic_tls_acme_webroot` on the host; a web server there must serve them on port 80 for every name in the certificate.
 - **dns-01**: set `elastic_tls_acme_dns_tasks` to a tasks file of yours. It is included with `elastic_tls_acme_dns_records` (`{fqdn: [txt values]}`) and `elastic_tls_acme_dns_state: present` before validation, and again with `absent` afterwards.
 
-You have to set `elastic_tls_acme_terms_agreed: true`. Let's Encrypt certificates are for servers only: they carry no `clientAuth` and no IP addresses, so the role refuses `usage: [client]` and `ip` entries with this provider. Elasticsearch node (transport) certificates have to come from the private CA; Let's Encrypt suits the Kibana or Fleet Server address that browsers and agents connect to. Each entry's `ca` is the system trust store, `elastic_tls_acme_ca_path`.
+You have to set `elastic_tls_acme_terms_agreed: true`. Let's Encrypt certificates are for servers only: they carry no `clientAuth` and no IP addresses, so the role refuses `usage: [client]` and `ip` entries with this provider. Elasticsearch node (transport) certificates have to come from the private CA; Let's Encrypt suits the Kibana or Fleet Server address that browsers and agents connect to. Each entry's `ca` is the system trust store, `elastic_tls_acme_ca_path` (`/etc/pki/tls/certs/ca-bundle.crt` on Enterprise Linux, `/etc/ssl/certs/ca-certificates.crt` on Ubuntu).
 
 The Let's Encrypt path is not exercised by the Molecule tests.
 
 ## Requirements
 
 - ansible-core 2.15 or later and the `community.crypto` collection 2.10 or later (`ansible-galaxy collection install -r requirements.yml`).
-- Targets and the CA host: RHEL, Rocky Linux or AlmaLinux 9 or 10. The role installs `python3-cryptography` on them (`elastic_tls_packages`); change that list if `ansible_python_interpreter` is not the platform Python.
+- Targets and the CA host: RHEL, Rocky Linux or AlmaLinux 9 or 10, or Ubuntu 24.04 or 26.04. The role installs `python3-cryptography` on them (`elastic_tls_packages`) with dnf or apt; change that list if `ansible_python_interpreter` is not the platform Python.
 - Run with `become: true`, and gather facts unless every certificate lists its own `dns` and `ip`.
 
 ## Role variables
@@ -170,13 +170,18 @@ KVM/libvirt (`qemu:///system`). Each VM has its own kernel, so SELinux is enforc
 as `vm.max_map_count` are the VM's own. Overrides for the VMs go in
 `molecule/kvm/inventory/group_vars/<group>/kvm.yml`.
 
+[`molecule/kvm-ubuntu2404/`](molecule/kvm-ubuntu2404/) and
+[`molecule/kvm-ubuntu2604/`](molecule/kvm-ubuntu2604/) run the same thing on Ubuntu 24.04 and 26.04
+VMs. They only swap the cloud image, and share `molecule/kvm/`'s playbooks and inventory.
+
 ```bash
-molecule test -s kvm
+for s in kvm kvm-ubuntu2404 kvm-ubuntu2604; do molecule test -s "$s" || break; done
 ```
 
 The machine running Molecule needs libvirt, `virt-install`, `qemu-img` and `xorriso`, and its user
-must be able to manage `qemu:///system`. The AlmaLinux 10 cloud image downloads once, checksum
-verified, to `/var/lib/libvirt/images/molecule`; each VM gets a throwaway disk on top of it.
+must be able to manage `qemu:///system`. Each cloud image downloads once, checksum verified, to
+`/var/lib/libvirt/images/molecule`; each VM gets a throwaway disk on top of it. VM names include the
+scenario, so the three scenarios can also run side by side if the machine has the memory.
 
 ## License
 

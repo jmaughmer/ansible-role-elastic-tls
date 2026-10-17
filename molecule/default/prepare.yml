@@ -6,7 +6,11 @@
   become: true
   gather_facts: false
   tasks:
+    - name: Read the distribution
+      ansible.builtin.setup:
+        gather_subset: [min]
+
     - name: Install openssl for verify.yml
-      ansible.builtin.dnf:
+      ansible.builtin.package:
         name: openssl
         state: present
