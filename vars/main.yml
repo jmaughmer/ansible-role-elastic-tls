@@ -39,3 +39,6 @@ _elastic_tls_usage_eku:
 # means an inventory that has not been migrated yet.
 _elastic_tls_legacy_vars_regex: >-
   ^elastic_tls_(components|component_settings|certutil|ca_key_password|cert_name|cert_extra_dns|cert_extra_ip|cert_dns|cert_ip|cert_regenerate|ca_cert_filename|cert_filename|key_filename|restart_services|elasticsearch_.*|kibana_.*)$
+
+# The CA host's os_family, '' when its facts were not gathered.
+_elastic_tls_ca_os_family: "{{ hostvars[elastic_tls_ca_host]['ansible_facts']['os_family'] | default('') }}"
