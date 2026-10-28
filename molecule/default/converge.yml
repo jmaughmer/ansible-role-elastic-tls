@@ -4,7 +4,6 @@
 # everything else, unchanged.
 - name: Converge
   hosts: all
-  become: true
   gather_facts: true
   tasks:
     - name: Apply the role

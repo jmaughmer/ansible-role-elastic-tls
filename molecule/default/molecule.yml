@@ -1,11 +1,17 @@
 ---
-# Three containers on one network, all in the play:
-#   es01      group elasticsearch, so it is the CA host; default certificate
-#   kb01      two certificates, one of them server-only with an extra name
-#   client01  no certificates, only the CA certificate
-# MOLECULE_DISTRO picks the EL release (default rockylinux9; also rockylinux10).
-# Nothing Elastic is installed: the role must work on a bare host, before the
-# elasticsearch role has run.
+# Three containers on one network, all in the play. The playbooks find them by
+# group, and every scenario names its hosts and network after itself, so
+# scenarios can run at the same time.
+#   tls-default-es      group elasticsearch, so it is the CA host; default
+#                       certificate
+#   tls-default-kb      group kibana: two certificates, one of them
+#                       server-only with an extra name
+#   tls-default-client  group clients: no certificates, only the CA
+#                       certificate
+# MOLECULE_EL picks the AlmaLinux release of the almalinux/<release>-init
+# image (default 9; also 10). Nothing Elastic is installed: the role must work
+# on a bare host, before the elasticsearch role has run. Ansible connects as
+# root, so the playbooks do not use become: the images have no sudo.
 role_name_check: 1
 
 dependency:
@@ -15,28 +21,28 @@ driver:
   name: podman
 
 platforms:
-  - name: es01
-    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+  - name: tls-default-es
+    image: "docker.io/almalinux/${MOLECULE_EL:-9}-init:latest"
     pre_build_image: true
     override_command: false   # keep the image's own CMD: systemd as PID 1
     systemd: always
-    network: elastic_tls_molecule
+    network: elastic_tls_default
     groups: [elasticsearch]
 
-  - name: kb01
-    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+  - name: tls-default-kb
+    image: "docker.io/almalinux/${MOLECULE_EL:-9}-init:latest"
     pre_build_image: true
     override_command: false
     systemd: always
-    network: elastic_tls_molecule
+    network: elastic_tls_default
     groups: [kibana]
 
-  - name: client01
-    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+  - name: tls-default-client
+    image: "docker.io/almalinux/${MOLECULE_EL:-9}-init:latest"
     pre_build_image: true
     override_command: false
     systemd: always
-    network: elastic_tls_molecule
+    network: elastic_tls_default
     groups: [clients]
 
 provisioner:
@@ -44,7 +50,6 @@ provisioner:
   inventory:
     links:
       group_vars: inventory/group_vars/
-      host_vars: inventory/host_vars/
 
 verifier:
   name: ansible

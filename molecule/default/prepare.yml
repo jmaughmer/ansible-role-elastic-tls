@@ -1,16 +1,20 @@
 ---
-# verify.yml inspects the files with the openssl command, which the
-# rockylinux10 image lacks. The role itself does not need it.
+# The test images lack two packages a real host has:
+#   - iproute (iproute2 on Ubuntu): without it there are no network facts, so
+#     no IP address among the default certificate names;
+#   - openssl (AlmaLinux 10): verify.yml inspects the files with it. The role
+#     itself does not need it.
 - name: Prepare
   hosts: all
-  become: true
   gather_facts: false
   tasks:
     - name: Read the distribution
       ansible.builtin.setup:
         gather_subset: [min]
 
-    - name: Install openssl for verify.yml
+    - name: Install iproute and openssl
       ansible.builtin.package:
-        name: openssl
+        name:
+          - "{{ 'iproute2' if ansible_facts['os_family'] == 'Debian' else 'iproute' }}"
+          - openssl
         state: present

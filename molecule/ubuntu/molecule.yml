@@ -1,0 +1,65 @@
+---
+# The default scenario on Ubuntu: same groups, sequence, playbooks and
+# inventory, all taken from ../default/, with hosts and a network of its own.
+# MOLECULE_UBUNTU picks the release (default 24.04; also 26.04).
+# Dockerfile.j2 adds systemd and Python to the official ubuntu image, so
+# systemd runs as PID 1 as on the AlmaLinux init images.
+#   molecule test -s ubuntu
+#   MOLECULE_UBUNTU=26.04 molecule test -s ubuntu
+role_name_check: 1
+
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ${MOLECULE_SCENARIO_DIRECTORY}/../default/requirements.yml
+
+driver:
+  name: podman
+
+platforms:
+  - name: tls-ubuntu-es
+    image: "docker.io/library/ubuntu:${MOLECULE_UBUNTU:-24.04}"
+    override_command: false   # keep Dockerfile.j2's CMD: systemd as PID 1
+    systemd: always
+    network: elastic_tls_ubuntu
+    groups: [elasticsearch]
+
+  - name: tls-ubuntu-kb
+    image: "docker.io/library/ubuntu:${MOLECULE_UBUNTU:-24.04}"
+    override_command: false
+    systemd: always
+    network: elastic_tls_ubuntu
+    groups: [kibana]
+
+  - name: tls-ubuntu-client
+    image: "docker.io/library/ubuntu:${MOLECULE_UBUNTU:-24.04}"
+    override_command: false
+    systemd: always
+    network: elastic_tls_ubuntu
+    groups: [clients]
+
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: ../default/prepare.yml
+    converge: ../default/converge.yml
+    verify: ../default/verify.yml
+  inventory:
+    links:
+      group_vars: ../default/inventory/group_vars/
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - check
+    - verify
+    - destroy

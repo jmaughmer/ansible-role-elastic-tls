@@ -149,10 +149,10 @@ Earlier versions of this role ran `elasticsearch-certutil`, copied files into ea
 ```bash
 pip install -r molecule/requirements.txt
 yamllint . && ansible-lint
-molecule test                              # MOLECULE_DISTRO=rockylinux10 for EL 10
+molecule test                              # MOLECULE_EL=10 for AlmaLinux 10
 ```
 
-[`molecule/default/`](molecule/default/) runs on three bare containers with rootless Podman: `es01` (in `elasticsearch`, so the CA host), `kb01` with two certificates, one of them server-only with its own names, and `client01` with none. Nothing Elastic is installed; [`prepare.yml`](molecule/default/prepare.yml) only adds the `openssl` command for verify. The sequence is converge, idempotence, check mode, then [`verify.yml`](molecule/default/verify.yml), which checks:
+[`molecule/default/`](molecule/default/) runs on three bare `docker.io/almalinux/<release>-init` containers with rootless Podman (any Linux host with systemd and Podman, such as an AlmaLinux 10 WSL 2 distribution with `systemd=true`; no KVM is needed): `tls-default-es` (in `elasticsearch`, so the CA host), `tls-default-kb` (in `kibana`) with two certificates, one of them server-only with its own names, and `tls-default-client` (in `clients`) with none. The playbooks find the hosts by group, and each scenario names its containers and network after itself, so different scenarios, in this role or the others, can run at the same time. One scenario runs once at a time: Molecule keeps a single state per scenario, so run `MOLECULE_EL=9` and `MOLECULE_EL=10` one after the other. Nothing Elastic is installed; [`prepare.yml`](molecule/default/prepare.yml) only adds `iproute` (`iproute2` on Ubuntu), for network facts, and the `openssl` command for verify. The sequence is converge, idempotence, check mode, then [`verify.yml`](molecule/default/verify.yml), which checks:
 
 - the published `elastic_tls_ssl_certificates` per host: names, and certificate, key and CA paths, and that it passes the elasticsearch role's preflight checks;
 - every certificate chains to the CA, its key is unencrypted PKCS#8, matches it and is `root:root 0600`;
@@ -162,26 +162,21 @@ molecule test                              # MOLECULE_DISTRO=rockylinux10 for EL
 - changing a certificate's names reissues it;
 - a variable of the certutil-based role makes the role fail.
 
-### On KVM virtual machines
+### On Ubuntu
 
-[`molecule/kvm/`](molecule/kvm/) runs the default scenario on real AlmaLinux 10 virtual machines
-instead of containers: the same hosts, groups, playbooks and inventory, one VM per host, on local
-KVM/libvirt (`qemu:///system`). Each VM has its own kernel, so SELinux is enforcing and settings such
-as `vm.max_map_count` are the VM's own. Overrides for the VMs go in
-`molecule/kvm/inventory/group_vars/<group>/kvm.yml`.
-
-[`molecule/kvm-ubuntu2404/`](molecule/kvm-ubuntu2404/) and
-[`molecule/kvm-ubuntu2604/`](molecule/kvm-ubuntu2604/) run the same thing on Ubuntu 24.04 and 26.04
-VMs. They only swap the cloud image, and share `molecule/kvm/`'s playbooks and inventory.
+[`molecule/ubuntu/`](molecule/ubuntu/) runs the default scenario on Ubuntu containers: the same
+groups, playbooks and inventory, with hosts of its own (`tls-ubuntu-*`), from the official
+`ubuntu` image with systemd and Python added ([`Dockerfile.j2`](molecule/ubuntu/Dockerfile.j2)).
+`MOLECULE_UBUNTU` picks the release (default `24.04`; also `26.04`). It can run alongside the
+default scenario.
 
 ```bash
-for s in kvm kvm-ubuntu2404 kvm-ubuntu2604; do molecule test -s "$s" || break; done
+molecule test -s ubuntu
+MOLECULE_UBUNTU=26.04 molecule test -s ubuntu
 ```
 
-The machine running Molecule needs libvirt, `virt-install`, `qemu-img` and `xorriso`, and its user
-must be able to manage `qemu:///system`. Each cloud image downloads once, checksum verified, to
-`/var/lib/libvirt/images/molecule`; each VM gets a throwaway disk on top of it. VM names include the
-scenario, so the three scenarios can also run side by side if the machine has the memory.
+Not covered by containers: SELinux enforcing. The containers share the host's kernel, and WSL's
+does not enforce SELinux.
 
 ## License
 

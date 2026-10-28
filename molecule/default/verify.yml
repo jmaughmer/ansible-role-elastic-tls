@@ -1,13 +1,13 @@
 ---
 - name: Verify the published fact and the files it points at
   hosts: all
-  become: true
   gather_facts: false
   vars:
-    expected_names:
-      es01: [es01]
-      kb01: [kb01, kibana-public]
-      client01: []
+    # By group, so the scenarios can name their hosts as they like.
+    expected_names: >-
+      {{ [inventory_hostname] if 'elasticsearch' in group_names
+         else [inventory_hostname, 'kibana-public'] if 'kibana' in group_names
+         else [] }}
   tasks:
     - name: Read the fact saved by converge
       ansible.builtin.slurp:
@@ -17,7 +17,7 @@
     - name: Check the shape of elastic_tls_ssl_certificates
       ansible.builtin.assert:
         that:
-          - certs | map(attribute='name') | list == expected_names[inventory_hostname]
+          - certs | map(attribute='name') | list == expected_names
           - certs | selectattr('certificate.path', 'defined') | list | length == certs | length
           - certs | selectattr('key.path', 'defined') | list | length == certs | length
           - certs | selectattr('ca.path', 'defined') | list | length == certs | length
@@ -39,7 +39,7 @@
         entry: >-
           {{ fact_raw.content | b64decode | from_json
              | selectattr('name', 'equalto', inventory_hostname) | first | default({}) }}
-      when: inventory_hostname != 'client01'
+      when: "'clients' not in group_names"
 
     - name: Set the certificate list
       ansible.builtin.set_fact:
@@ -156,7 +156,7 @@
       ansible.builtin.assert:
         that:
           - "'DNS:kibana.example.test' in item.stdout"
-          - "'DNS:kb01' not in item.stdout"
+          - ('DNS:' ~ inventory_hostname) not in item.stdout
           - "'IP Address:' not in item.stdout"
       loop: "{{ exts.results | selectattr('item.name', 'equalto', 'kibana-public') | list }}"
       loop_control:
@@ -178,7 +178,6 @@
 
 - name: Verify the CA host
   hosts: all
-  become: true
   gather_facts: false
   tasks:
     - name: Stat the CA key
@@ -189,25 +188,24 @@
     - name: Check that only the CA host holds the CA key
       ansible.builtin.assert:
         that:
-          - ca_key.stat.exists == (inventory_hostname == 'es01')
+          - ca_key.stat.exists == ('elasticsearch' in group_names)
 
     - name: Read the CA key header
       ansible.builtin.command:
         argv: [head, -n1, /etc/elastic-tls/ca/ca.key]
       register: ca_key_head
       changed_when: false
-      when: inventory_hostname == 'es01'
+      when: "'elasticsearch' in group_names"
 
     - name: Check that the CA key is encrypted with the passphrase
       ansible.builtin.assert:
         that:
           - ca_key_head.stdout == '-----BEGIN ENCRYPTED PRIVATE KEY-----'
           - ca_key.stat.mode == '0600'
-      when: inventory_hostname == 'es01'
+      when: "'elasticsearch' in group_names"
 
 - name: Verify that changing a certificate's names reissues it
-  hosts: kb01
-  become: true
+  hosts: kibana
   gather_facts: true
   tasks:
     - name: Fingerprint the current certificate
@@ -249,8 +247,7 @@
           - "'DNS:kibana2.example.test' in after.stdout"
 
 - name: Verify that variables of the certutil-based role are refused
-  hosts: client01
-  become: true
+  hosts: clients
   gather_facts: false
   tasks:
     - name: Apply the role with elastic_tls_components set
