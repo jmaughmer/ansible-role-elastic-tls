@@ -146,13 +146,15 @@ Earlier versions of this role ran `elasticsearch-certutil`, copied files into ea
 
 ## Testing
 
-```bash
-pip install -r molecule/requirements.txt
-yamllint . && ansible-lint
-molecule test                              # MOLECULE_EL=10 for AlmaLinux 10
-```
-
-[`molecule/default/`](molecule/default/) runs on three bare `docker.io/almalinux/<release>-init` containers with rootless Podman (any Linux host with systemd and Podman, such as an AlmaLinux 10 WSL 2 distribution with `systemd=true`; no KVM is needed): `tls-default-es` (in `elasticsearch`, so the CA host), `tls-default-kb` (in `kibana`) with two certificates, one of them server-only with its own names, and `tls-default-client` (in `clients`) with none. The playbooks find the hosts by group, and each scenario names its containers and network after itself, so different scenarios, in this role or the others, can run at the same time. One scenario runs once at a time: Molecule keeps a single state per scenario, so run `MOLECULE_EL=9` and `MOLECULE_EL=10` one after the other. Nothing Elastic is installed; [`prepare.yml`](molecule/default/prepare.yml) only adds `iproute` (`iproute2` on Ubuntu), for network facts, and the `openssl` command for verify. The sequence is converge, idempotence, check mode, then [`verify.yml`](molecule/default/verify.yml), which checks:
+[`molecule/default/`](molecule/default/) runs on three bare VMs cloned from the Proxmox test
+lab's fleet onto its isolated labnet network — SELinux enforcing, firewalld running:
+`tls-default-es` (in `elasticsearch`, so the CA host), `tls-default-kb` (in `kibana`) with two
+certificates, one of them server-only with its own names, and `tls-default-client` (in
+`clients`) with none. The playbooks find the hosts by group. Nothing Elastic is installed: the
+role must work on a bare host, before the elasticsearch role has run;
+[`prepare.yml`](molecule/default/prepare.yml) gets the VMs onto the labnet resolver and adds
+`iproute`, for network facts, and the `openssl` command for verify. The sequence is converge,
+idempotence, check mode, then [`verify.yml`](molecule/default/verify.yml), which checks:
 
 - the published `elastic_tls_ssl_certificates` per host: names, and certificate, key and CA paths, and that it passes the elasticsearch role's preflight checks;
 - every certificate chains to the CA, its key is unencrypted PKCS#8, matches it and is `root:root 0600`;
@@ -162,21 +164,34 @@ molecule test                              # MOLECULE_EL=10 for AlmaLinux 10
 - changing a certificate's names reissues it;
 - a variable of the certutil-based role makes the role fail.
 
-### On Ubuntu
-
-[`molecule/ubuntu/`](molecule/ubuntu/) runs the default scenario on Ubuntu containers: the same
-groups, playbooks and inventory, with hosts of its own (`tls-ubuntu-*`), from the official
-`ubuntu` image with systemd and Python added ([`Dockerfile.j2`](molecule/ubuntu/Dockerfile.j2)).
-`MOLECULE_UBUNTU` picks the release (default `24.04`; also `26.04`). It can run alongside the
-default scenario.
+Tests run on the lab's molecule control machine: `molecule`, `molecule-proxmox` and the role's
+collections are preinstalled there, and the driver's connection secrets and SSH key live only in
+its own config files. Nothing lab-specific is in this repo beyond the fleet template name and the
+default VMID band (9260–9262); hosts, tokens and subnets never leave the control machine. The Test
+Lab project's `molecule-labnet/` directory documents the lab itself. `LAB_TEMPLATE` picks the
+guest release (default `template-alma9`; also `template-alma10` or `template-alma8`):
 
 ```bash
-molecule test -s ubuntu
-MOLECULE_UBUNTU=26.04 molecule test -s ubuntu
+molecule test                                   # AlmaLinux 9, SELinux enforcing
+LAB_TEMPLATE=template-alma10 molecule test      # the other EL release
 ```
 
-Not covered by containers: SELinux enforcing. The containers share the host's kernel, and WSL's
-does not enforce SELinux.
+The VMIDs come from `LAB_VMID_0..2` and default to the pinned 9260–9262 band, so a plain
+`molecule test` means one lab run of this repo at a time. For several runs of this repo at once,
+use the lab's `mlab` wrapper, which claims a free VMID band (and an isolated ephemeral directory)
+per run:
+
+```bash
+/root/labnet/mlab test -s default               # parallel-safe run on the control machine
+```
+
+Lint with `yamllint .` and `ansible-lint` (configured by [`.yamllint`](.yamllint) and
+[`.ansible-lint`](.ansible-lint)). There is no CI; run the lint and Molecule from the control
+machine.
+
+Not covered by the scenario: the Ubuntu guest path (the removed `ubuntu` container scenario — the
+role does support Ubuntu, but the tests now run EL guests only) and the Let's Encrypt provider,
+which a test CA cannot stand in for; point `elastic_tls_provider: acme` at a staging CA manually.
 
 ## License
 

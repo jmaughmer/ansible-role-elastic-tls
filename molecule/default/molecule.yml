@@ -1,52 +1,68 @@
 ---
-# Three containers on one network, all in the play. The playbooks find them by
-# group, and every scenario names its hosts and network after itself, so
-# scenarios can run at the same time.
+# Tests run on the Proxmox test lab: three real KVM VMs cloned from the lab
+# fleet onto the isolated labnet network (EL release chosen by LAB_TEMPLATE),
+# SELinux enforcing and firewalld running, all in the play. The playbooks
+# find them by group:
 #   tls-default-es      group elasticsearch, so it is the CA host; default
 #                       certificate
 #   tls-default-kb      group kibana: two certificates, one of them
 #                       server-only with an extra name
 #   tls-default-client  group clients: no certificates, only the CA
 #                       certificate
-# MOLECULE_EL picks the AlmaLinux release of the almalinux/<release>-init
-# image (default 9; also 10). Nothing Elastic is installed: the role must work
-# on a bare host, before the elasticsearch role has run. Ansible connects as
-# root, so the playbooks do not use become: the images have no sudo.
+# Nothing Elastic is installed: the role must work on a bare host, before the
+# elasticsearch role has run. The driver's SSH lands as a sudo user, so
+# inventory/group_vars/all.yml sets ansible_become and every task of the
+# repo's own playbooks runs privileged through it.
+#
+# All Proxmox connection details live in the driver's secrets file on the
+# control machine, not here. Default VMIDs are the repo's 9260-9262 band, via
+# LAB_VMID_0..2 so the lab's `mlab` runner can claim a free band per run and
+# allow parallel runs of this repo; a plain molecule test uses the pinned
+# band, one lab run of this repo at a time.
+#
+# Run on the lab's molecule control machine:
+#   /root/labnet/mlab test -s default              # parallel-safe, recommended
+#   molecule test                                  # pinned band
+#   LAB_TEMPLATE=template-alma10 molecule test     # the other EL release
 role_name_check: 1
 
 dependency:
-  name: galaxy   # installs requirements.yml next to this file
+  name: galaxy
+  enabled: false        # collections preinstalled on the control machine
+prerun: false
 
 driver:
-  name: podman
+  name: molecule-proxmox
+  options:
+    proxmox_secrets: ${LAB_PROXMOX_SECRETS:-/root/.config/molecule/proxmox-secrets.yml}
+    node: ${LAB_NODE:-galactica}
+    validate_certs: false   # the lab's PVE uses its self-signed cert
+    ssh_user: labadmin
+    ssh_identity_file: /root/.ssh/id_ed25519
+    full: true
+    pool: testlab
+    timeout: 300
 
 platforms:
   - name: tls-default-es
-    image: "docker.io/almalinux/${MOLECULE_EL:-9}-init:latest"
-    pre_build_image: true
-    override_command: false   # keep the image's own CMD: systemd as PID 1
-    systemd: always
-    network: elastic_tls_default
+    template_name: ${LAB_TEMPLATE:-template-alma9}
+    newid: ${LAB_VMID_0:-9260}
     groups: [elasticsearch]
 
   - name: tls-default-kb
-    image: "docker.io/almalinux/${MOLECULE_EL:-9}-init:latest"
-    pre_build_image: true
-    override_command: false
-    systemd: always
-    network: elastic_tls_default
+    template_name: ${LAB_TEMPLATE:-template-alma9}
+    newid: ${LAB_VMID_1:-9261}
     groups: [kibana]
 
   - name: tls-default-client
-    image: "docker.io/almalinux/${MOLECULE_EL:-9}-init:latest"
-    pre_build_image: true
-    override_command: false
-    systemd: always
-    network: elastic_tls_default
+    template_name: ${LAB_TEMPLATE:-template-alma9}
+    newid: ${LAB_VMID_2:-9262}
     groups: [clients]
 
 provisioner:
   name: ansible
+  env:
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/..:/root/.ansible/roles"
   inventory:
     links:
       group_vars: inventory/group_vars/
@@ -56,7 +72,6 @@ verifier:
 
 scenario:
   test_sequence:
-    - dependency
     - destroy
     - syntax
     - create

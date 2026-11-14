@@ -1,4 +1,8 @@
 ---
+# The molecule-proxmox driver's SSH lands as a sudo user; the plays need no
+# become of their own because every task runs privileged through it.
+ansible_become: true
+
 elastic_tls_provider: ca
 elastic_tls_ca_common_name: Molecule Test CA
 elastic_tls_ca_passphrase: molecule-test-passphrase
