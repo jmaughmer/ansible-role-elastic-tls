@@ -1,8 +1,10 @@
 .venv/
 .ansible/
 __pycache__/
+*.pyc
 *.retry
 .cache/
+.molecule/
 
 # Private Proxmox-lab scenario: lives only on the control machine, holds the
 # real topology. Never committed (public repo); connection secrets live in
